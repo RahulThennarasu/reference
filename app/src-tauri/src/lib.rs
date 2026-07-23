@@ -78,6 +78,14 @@ struct SearchResponse {
     answer: Option<Answer>,
 }
 
+// Answer synthesis needs a much wider candidate pool than the results list
+// shown in the UI (`top_k`, typically 8) — it filters down to prose files
+// internally, and with enough indexed folders/noise in the mix, the actual
+// relevant .md/.txt files can easily rank outside the top 8 overall while
+// still being the best prose match. hybrid_search already scores the whole
+// table before truncating, so asking for more rows here costs nothing extra.
+const SYNTHESIS_CANDIDATE_POOL: usize = 50;
+
 #[tauri::command]
 async fn search(
     state: State<'_, AppState>,
@@ -87,7 +95,7 @@ async fn search(
     let embedding = state.embedder.embed(&query).map_err(|e| e.to_string())?;
     let hits = state
         .store
-        .hybrid_search(&query, &embedding, top_k)
+        .hybrid_search(&query, &embedding, top_k.max(SYNTHESIS_CANDIDATE_POOL))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -108,6 +116,7 @@ async fn search(
 
     let results = hits
         .into_iter()
+        .take(top_k)
         .map(|h| SearchResult { path: h.path, score: h.score })
         .collect();
 
