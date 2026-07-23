@@ -12,7 +12,14 @@ body {
   padding: 0;
   height: 100vh;
   width: 100vw;
-  background: transparent;
+  /* #212121, sampled directly from icons/icon-macos-squircle.png's fill —
+     flat, no vibrancy/blur, matches the app icon exactly. The window itself
+     stays transparent only so macOS can round its outer corners; without
+     `border-radius` + `overflow: hidden` here, this flat fill's square
+     corners poke past that rounded mask and show up as a stray light
+     fringe at the edges. */
+  background: #212121;
+  border-radius: 12px;
   overflow: hidden;
   user-select: none;
 }

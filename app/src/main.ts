@@ -78,8 +78,8 @@ const COLLAPSED_HEIGHT = 64;
 const MAX_VISIBLE_ROWS = 8;
 const MAX_WINDOW_HEIGHT = 560;
 const WINDOW_WIDTH = 680;
-const DEFAULT_PLACEHOLDER = "Search your files — ⌘7 to add a folder";
-const FOLDER_PLACEHOLDER = "Type a folder path — Tab to complete, Enter to watch";
+const DEFAULT_PLACEHOLDER = "search your files — ⌘7 to add a folder";
+const FOLDER_PLACEHOLDER = "type a folder path — tab to complete, enter to watch";
 
 let searchInputEl: HTMLInputElement | null;
 let resultsEl: HTMLElement | null;
@@ -141,7 +141,7 @@ function renderError(message: string) {
 function renderCitation(citation: Citation): HTMLElement {
   const li = document.createElement("li");
   li.className = "answer clickable";
-  li.title = `Open ${basename(citation.path)} at line ${citation.line}`;
+  li.title = `open ${basename(citation.path)} at line ${citation.line}`;
   li.addEventListener("click", () => openInEditor(citation.path, citation.line));
 
   const summary = document.createElement("p");
@@ -177,7 +177,7 @@ function renderResponse(response: SearchResponse, query: string) {
   for (const r of response.results) {
     const li = document.createElement("li");
     li.className = "result clickable";
-    li.title = `Open ${basename(r.path)}`;
+    li.title = `open ${basename(r.path)}`;
     li.addEventListener("click", () => openResultInEditor(r.path, query));
 
     const name = document.createElement("span");
@@ -236,7 +236,7 @@ function renderFolderMode() {
       // apply — this is the same style icon set, just used as raw SVG).
       remove.innerHTML =
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
-      remove.title = `Stop watching ${folder}`;
+      remove.title = `stop watching ${folder}`;
       remove.addEventListener("click", (e) => {
         e.stopPropagation();
         unwatchFolder(folder);
@@ -346,7 +346,7 @@ async function commitFolder() {
   const folderName = basename(folder);
 
   exitFolderMode();
-  if (searchInputEl) searchInputEl.placeholder = `Indexing ${folderName}...`;
+  if (searchInputEl) searchInputEl.placeholder = `indexing ${folderName}...`;
   try {
     await invoke("start_watch", { folder });
   } catch (err) {

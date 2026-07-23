@@ -8,9 +8,7 @@ use reference_core::store::Store;
 use reference_core::synthesize;
 use reference_core::watcher;
 use serde::Serialize;
-use tauri::{Manager, State};
-#[cfg(target_os = "macos")]
-use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+use tauri::State;
 
 // Deliberately outside src-tauri/: Tauri's dev watcher rebuilds+restarts the
 // app on any change under src-tauri/, and LanceDB writes temp files on every
@@ -353,15 +351,6 @@ pub fn run() {
             home_dir,
             list_dir_suggestions
         ])
-        .setup(|app| {
-            #[cfg(target_os = "macos")]
-            {
-                let window = app.get_webview_window("main").expect("main window missing");
-                apply_vibrancy(&window, NSVisualEffectMaterial::Popover, None, Some(16.0))
-                    .expect("failed to apply macOS vibrancy");
-            }
-            Ok(())
-        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
