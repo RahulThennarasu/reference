@@ -159,6 +159,17 @@ impl Store {
         hits.truncate(k);
         Ok(hits)
     }
+
+    /// Deletes every indexed row whose path is under `folder`. `merge_insert`
+    /// only ever adds/updates rows, so without this, un-watching a folder
+    /// would stop it from being *updated* but leave everything already
+    /// indexed permanently searchable — not what "un-watch" should mean.
+    pub async fn delete_under(&self, folder: &str) -> Result<()> {
+        let folder = folder.trim_end_matches('/').replace('\'', "''");
+        let predicate = format!("path LIKE '{folder}/%'");
+        self.table.delete(&predicate).await?;
+        Ok(())
+    }
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {

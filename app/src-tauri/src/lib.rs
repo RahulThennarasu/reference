@@ -221,10 +221,13 @@ fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String>
 }
 
 /// Stops watching `folder`: signals its background thread to exit (it
-/// notices within ~300ms) and drops it from the persisted folder list.
+/// notices within ~300ms), drops it from the persisted folder list, and
+/// purges every already-indexed row under it so it actually stops being
+/// searchable rather than just stopping being updated.
 #[tauri::command]
-fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
+async fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
     let path = PathBuf::from(&folder);
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
     {
         let mut watching = state.watching.lock().map_err(|e| e.to_string())?;
         if let Some(stop) = watching.remove(&path) {
@@ -232,6 +235,13 @@ fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> 
         }
     }
     save_watched_folders(&state);
+
+    state
+        .store
+        .delete_under(&canonical.to_string_lossy())
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
