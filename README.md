@@ -33,7 +33,8 @@ this app is the real version: an actual local index of your files, kept current 
 | embeddings      | `candle` (rust-native ml) | cuda support on pc, metal support on mac, no python dependency                                                                                        |
 | embedding model | all-minilm-l6-v2          | smallest, fastest, most battle-tested with candle, safest starting point                                                                              |
 | vector storage  | lancedb (rust crate)      | embedded (in-process, no server), native rust bindings, hybrid vector + metadata filtering, versioned storage                                         |
-| upsert behavior | `table::merge_insert`     | confirmed available in the current lancedb rust crate (v0.31.0), handles "file changed, re-embed it" as a single upsert operation, keyed on file path |
+| upsert behavior | `table::merge_insert`     | confirmed available in the current lancedb rust crate (v0.31.0), handles "file changed, re-embed it" as a delete-then-upsert keyed on path + start line, since one file is now many chunk rows |
+| code chunking    | `tree-sitter`             | parses rust/python/typescript/javascript into function/class-level chunks instead of embedding a whole file as one vector, see `docs/code-aware-chunking.md` |
 
 ## core features (v1 scope)
 
@@ -41,7 +42,9 @@ this app is the real version: an actual local index of your files, kept current 
 - real-time file watching (background daemon, not manual re-scan)
 - local gpu-accelerated embeddings (cuda / metal)
 - hybrid search: fast fuzzy filename match + semantic match
+- code-aware chunking: search and cite exact functions/classes, not just whole files
 - answer synthesis with source citations, linking back to the actual file
+- a cli (`reference-cli`) sharing the same index as the app, built for coding agents to query directly, see `docs/cli-agent-usage.md`
 
 ## explicitly out of scope for v1
 
@@ -52,6 +55,7 @@ this app is the real version: an actual local index of your files, kept current 
 
 ## later / stretch ideas
 
+- a "send to agent" button in the search ui: copy a formatted query + citation context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent they're using
 - multi-machine indexing (search across a mac and a pc you own)
 - structured fact extraction (claims with provenance, not just chunk retrieval)
 - plugin/extension model for new source types (notion, browser history, calendar)
@@ -59,4 +63,4 @@ this app is the real version: an actual local index of your files, kept current 
 
 ## current status
 
-scaffolding stage. first slice being built: a cli (not yet the tauri app) that watches one hardcoded folder, embeds new/changed files with minilm on cpu, stores them in lancedb, and supports a basic `search <query>` command. gpu backend, the tauri shell, and the ui come after this loop works end-to-end.
+watch, embed, store, and hybrid search all work end-to-end, through both the tauri app and the cli, sharing one index. code is chunked at function/class granularity for rust, python, typescript, and javascript (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app. the cli additionally supports `--json` output for coding agents to consume directly, see `docs/cli-agent-usage.md`. no packaged installer yet, building from source is the only way to run it today.
