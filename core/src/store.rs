@@ -243,6 +243,14 @@ impl Store {
         self.table.delete(&predicate).await?;
         Ok(())
     }
+
+    /// Total row count across the whole table. Chunking turned this from
+    /// "one row per file" into "one row per function/class", so this is the
+    /// number to watch if `hybrid_search`'s full-table scan ever needs
+    /// revisiting per the note in docs/code-aware-chunking.md.
+    pub async fn row_count(&self) -> Result<usize> {
+        Ok(self.table.count_rows(None).await?)
+    }
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {

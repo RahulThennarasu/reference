@@ -97,6 +97,19 @@ Concrete plan: on every file re-index (create/modify event), first delete all ex
 
 The full-table brute-force scan (`hybrid_search` fetches every row, scores in Rust, no LanceDB ANN index — see `CLAUDE.md`'s note on `index::auto`) now runs over chunks instead of files. For a real codebase, expect 5–20x more rows than the current file-count. This is the point where "just scan everything" — chosen deliberately for simplicity at personal-file-index scale — starts to matter and should be re-measured, not assumed fine.
 
+**Measured** (`core/examples/bench_hybrid_search_scale.rs`, M-series CPU, release build, synthetic rows so the numbers isolate scan cost from disk/embedding variance):
+
+| rows | avg search time |
+| --- | --- |
+| 1,000 | 0.9ms |
+| 5,000 | 2.7ms |
+| 20,000 | 9.7ms |
+| 50,000 | 24.7ms |
+
+Scales linearly at roughly 0.5ms per 1,000 rows, as expected for a full scan. This project's own index (Rust+Python+TS/JS chunked) currently sits at 114 rows and searches in ~2-4ms (`core/examples/bench_hybrid_search.rs`) — consistent with the synthetic numbers and nowhere near a problem.
+
+Extrapolating: a codebase with ~5,000 files at ~8 chunks/file (≈40,000 rows) lands around ~20ms — still comfortably invisible next to the ~5-9ms embedding step and the UI's 150ms debounce. The scan only becomes noticeable (~100ms+) somewhere past ~200,000 rows, i.e. a very large monorepo. Verdict: the brute-force scan doesn't need replacing with a real ANN index for the personal/project-scale use case this app targets — revisit only if someone actually points it at something monorepo-sized.
+
 Fuzzy filename matching (the other half of hybrid ranking) stays file-level — matching "auth.rs" fuzzily against a query still makes sense per-file, not per-chunk.
 
 ### 5. answer synthesis (`core/src/synthesize.rs`)
