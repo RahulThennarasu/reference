@@ -49,7 +49,12 @@ fn split_sentences(text: &str) -> Vec<&str> {
     text.split('\n')
         .flat_map(|line| line.split_inclusive(['.', '!', '?']))
         .map(|s| s.trim())
-        .filter(|s| s.len() > 3)
+        // Markdown headings ("# reference") are short, title-like, and
+        // essentially never the actual answer to anything — but a small
+        // bi-encoder can still occasionally score one anomalously high
+        // against a short query, so they need to be excluded outright
+        // rather than left to lose on ranking alone.
+        .filter(|s| s.len() > 3 && !s.starts_with('#'))
         .collect()
 }
 
