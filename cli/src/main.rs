@@ -1,15 +1,12 @@
-mod device;
-mod embedding;
-mod store;
-mod watcher;
-
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use embedding::Embedder;
-use store::Store;
+use reference_core::embedding::Embedder;
+use reference_core::store::Store;
+use reference_core::synthesize;
+use reference_core::watcher;
 
 const DB_URI: &str = "data/reference-index";
 
@@ -52,12 +49,22 @@ async fn main() -> Result<()> {
         }
         Command::Search { query, top_k } => {
             let embedding = embedder.embed(&query)?;
-            let results = store.search(&embedding, top_k).await?;
-            if results.is_empty() {
+            let hits = store.hybrid_search(&query, &embedding, top_k).await?;
+            if hits.is_empty() {
                 println!("no results (index is empty — run `watch` first)");
             }
-            for (path, distance) in results {
-                println!("{distance:.4}  {path}");
+
+            if synthesize::is_question(&query) && !hits.is_empty() {
+                let answer = synthesize::synthesize(&embedder, &query, &hits)?;
+                println!("{}\n", answer.summary);
+                for citation in &answer.citations {
+                    println!("  source: {}", citation.path);
+                }
+                println!();
+            }
+
+            for hit in hits {
+                println!("{:.4}  {}", hit.score, hit.path);
             }
         }
     }

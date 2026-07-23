@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>reference</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="drag-region" data-tauri-drag-region></div>
+    <main class="panel">
+      <div class="search-bar">
+        <input
+          id="search-input"
+          placeholder="Search your files — ⌘7 to add a folder"
+          autofocus
+          autocomplete="off"
+        />
+      </div>
+      <ul id="results"></ul>
+    </main>
+  </body>
+</html>
