@@ -1,0 +1,30 @@
+[package]
+name = "reference-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+hf-hub = { version = "0.4.3", features = ["tokio"] }
+tokenizers = "0.23.1"
+
+lancedb = "0.31.0"
+arrow-array = "58.4"
+arrow-schema = "58.4"
+
+notify = "8.2.0"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
