@@ -135,6 +135,21 @@ async fn find_line(state: State<'_, AppState>, path: String, query: String) -> R
     synthesize::best_matching_line(&state.embedder, &query, &content).map_err(|e| e.to_string())
 }
 
+/// Slices out `start_line..=end_line` (1-indexed, inclusive) of `path`, for
+/// the "send to agent" button on a plain search result. Citations already
+/// carry their chunk's text from the index, but `SearchResult` doesn't (it's
+/// just path/score/line-range), so this re-reads the live file from disk,
+/// same as `find_line` does, rather than adding chunk content to every
+/// search response whether it's needed or not.
+#[tauri::command]
+fn read_chunk_preview(path: String, start_line: usize, end_line: usize) -> Result<String, String> {
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = start_line.saturating_sub(1).min(lines.len());
+    let end = end_line.min(lines.len()).max(start);
+    Ok(lines[start..end].join("\n"))
+}
+
 // A hard cap, not a soft warning: past this many files, something has
 // almost certainly been pointed at a home directory, a whole disk, or
 // another huge unrelated tree by mistake (this happened during dev — a
@@ -360,10 +375,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             search,
             find_line,
+            read_chunk_preview,
             start_watch,
             stop_watch,
             list_watched,

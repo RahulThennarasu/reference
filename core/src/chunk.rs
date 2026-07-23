@@ -43,23 +43,23 @@ pub fn chunk_source(extension: &str, source: &str) -> Option<Vec<Chunk>> {
 }
 
 // (function_item) covers free functions *and* methods inside an impl block —
-// the containment filter in `chunk_with` is what keeps methods from becoming
-// their own chunks separate from their enclosing impl.
+// `chunk_with` decides whether the impl or its individual methods end up as
+// the actual chunks.
 const RUST_QUERY_SRC: &str = "(function_item) @item (impl_item) @item";
 
 // Same idea for Python: methods inside a class are `function_definition`
-// nodes nested in the `class_definition`, swallowed by the same filter.
+// nodes nested in the `class_definition`.
 const PYTHON_QUERY_SRC: &str = "(function_definition) @item (class_definition) @item";
 
 // Covers named function declarations/classes plus the common
 // `const foo = () => {...}` / `const foo = function () {...}` pattern —
 // idiomatic JS/TS rarely uses bare `function` declarations for top-level
-// exports. Methods inside a class body are nested `method_definition`
-// nodes, swallowed into the class the same way Rust/Python methods are.
+// exports. `method_definition` covers methods inside a class body.
 const JS_QUERY_SRC: &str = "
 (function_declaration) @item
 (generator_function_declaration) @item
 (class_declaration) @item
+(method_definition) @item
 (lexical_declaration (variable_declarator value: (arrow_function))) @item
 (lexical_declaration (variable_declarator value: (function_expression))) @item
 ";
@@ -71,6 +71,7 @@ const TS_QUERY_SRC: &str = "
 (function_declaration) @item
 (generator_function_declaration) @item
 (class_declaration) @item
+(method_definition) @item
 (interface_declaration) @item
 (lexical_declaration (variable_declarator value: (arrow_function))) @item
 (lexical_declaration (variable_declarator value: (function_expression))) @item
@@ -83,6 +84,16 @@ fn kind_of(node_kind: &str) -> &'static str {
         "interface_declaration" => "interface",
         _ => "function",
     }
+}
+
+// `impl`/`class` blocks are containers: when they have methods inside, the
+// methods should be the chunks, not one blob covering the whole container.
+// `interface_declaration` isn't included here even though it's structurally
+// similar, because our queries never match anything nested inside one (a
+// TS interface's members are type signatures, not functions/classes), so it
+// always stays a single meaningful chunk on its own.
+fn is_container_kind(node_kind: &str) -> bool {
+    matches!(node_kind, "impl_item" | "class_definition" | "class_declaration")
 }
 
 fn chunk_with(language: Language, query_src: &str, source: &str) -> Option<Vec<Chunk>> {
@@ -100,16 +111,41 @@ fn chunk_with(language: Language, query_src: &str, source: &str) -> Option<Vec<C
             nodes.push(c.node);
         }
     }
-    nodes.sort_by_key(|n| n.start_byte());
 
-    // Keep only outermost matches: a closure or nested function inside a
-    // function body, or a method inside a class/impl block, is swallowed
-    // into its parent's chunk rather than becoming a separate row — a chunk
-    // should be an independently meaningful unit, and a method floating
-    // without its class/impl context isn't one.
+    // Drop a container (impl/class) when it has at least one other matched
+    // node nested inside it — its methods become individually meaningful
+    // chunks instead of one averaged-together blob. Measured on this
+    // project's own `impl Store` (5 methods, ~180 lines): keeping it as one
+    // chunk buried `hybrid_search`'s own scoring logic at rank 73 for a
+    // query about... hybrid search scoring. that's the exact dilution
+    // problem chunking exists to fix, just one level up from whole-file. A
+    // container with no matched children (rare, but possible) still gets
+    // kept whole rather than silently dropped.
+    let candidates: Vec<Node> = nodes
+        .iter()
+        .copied()
+        .filter(|&node| {
+            if !is_container_kind(node.kind()) {
+                return true;
+            }
+            !nodes.iter().any(|&other| {
+                other.id() != node.id()
+                    && other.start_byte() >= node.start_byte()
+                    && other.end_byte() <= node.end_byte()
+            })
+        })
+        .collect();
+
+    let mut sorted = candidates;
+    sorted.sort_by_key(|n| n.start_byte());
+
+    // Keep only outermost matches among what's left: a closure or nested
+    // function inside a function body is still swallowed into its parent
+    // function's chunk (that nesting is a genuinely coherent single unit,
+    // unlike a method sitting among several unrelated sibling methods).
     let mut kept: Vec<Node> = Vec::new();
     let mut last_end = 0usize;
-    for node in nodes {
+    for node in sorted {
         if node.start_byte() >= last_end {
             last_end = node.end_byte();
             kept.push(node);
@@ -162,7 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn free_functions_and_impls_become_separate_chunks() {
+    fn methods_inside_an_impl_become_individual_chunks() {
         let source = r#"
 use std::fmt;
 
@@ -187,9 +223,14 @@ impl Thing {
         let chunks = chunk_source("rs", source).expect("should produce chunks");
         let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
 
-        // preamble ("file"), free_function ("function"), impl block ("impl") —
-        // methods inside the impl must NOT show up as their own chunks.
-        assert_eq!(kinds, vec!["file", "function", "impl"]);
+        // preamble ("file"), free_function, method_one, method_two — no
+        // "impl" chunk at all, since the impl block had matched children.
+        // one blob covering both methods would dilute each method's own
+        // signal exactly the way whole-file embedding used to, which is
+        // the bug this test guards against (measured on this project's own
+        // `impl Store`: a 5-method, ~180-line impl chunk buried its own
+        // `hybrid_search` method at rank 73 for a query about hybrid search).
+        assert_eq!(kinds, vec!["file", "function", "function", "function"]);
 
         let preamble = &chunks[0];
         assert!(preamble.content.contains("use std::fmt"));
@@ -199,9 +240,24 @@ impl Thing {
         assert!(func.content.contains("fn free_function"));
         assert!(!func.content.contains("impl Thing"));
 
-        let impl_chunk = &chunks[2];
-        assert!(impl_chunk.content.contains("method_one"));
-        assert!(impl_chunk.content.contains("method_two"));
+        let method_one = &chunks[2];
+        assert!(method_one.content.contains("method_one"));
+        assert!(!method_one.content.contains("method_two"));
+
+        let method_two = &chunks[3];
+        assert!(method_two.content.contains("method_two"));
+        assert!(!method_two.content.contains("method_one"));
+    }
+
+    #[test]
+    fn impl_with_no_matched_children_is_kept_whole() {
+        // an impl block that (for whatever reason) has no function_item
+        // children matched shouldn't just vanish — fall back to keeping it
+        // as one chunk rather than silently dropping real code.
+        let source = "impl std::fmt::Debug for Thing {}\n";
+        let chunks = chunk_source("rs", source).expect("should produce chunks");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, "impl");
     }
 
     #[test]
@@ -256,13 +312,18 @@ class Thing:
 "#;
         let chunks = chunk_source("py", source).expect("should produce chunks");
         let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["file", "function", "class"]);
+        // no "class" chunk: Thing had matched method children, so its
+        // methods become individual chunks instead of one combined blob.
+        assert_eq!(kinds, vec!["file", "function", "function", "function"]);
 
         assert!(chunks[1].content.contains("def free_function"));
         assert!(!chunks[1].content.contains("class Thing"));
 
         assert!(chunks[2].content.contains("method_one"));
-        assert!(chunks[2].content.contains("method_two"));
+        assert!(!chunks[2].content.contains("method_two"));
+
+        assert!(chunks[3].content.contains("method_two"));
+        assert!(!chunks[3].content.contains("method_one"));
     }
 
     #[test]
@@ -286,7 +347,9 @@ class Thing {
 "#;
         let chunks = chunk_source("js", source).expect("should produce chunks");
         let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["file", "function", "function", "class"]);
+        // no "class" chunk: Thing had a matched method_definition child, so
+        // methodOne becomes its own chunk instead of being folded into Thing.
+        assert_eq!(kinds, vec!["file", "function", "function", "function"]);
 
         assert!(chunks[1].content.contains("namedFn"));
         assert!(chunks[2].content.contains("arrowFn"));

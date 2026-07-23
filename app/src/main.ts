@@ -9,6 +9,7 @@ import {
 } from "vscode-material-icons";
 import { parseInline } from "marked";
 import DOMPurify from "dompurify";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import hljs from "highlight.js/lib/core";
 import rust from "highlight.js/lib/languages/rust";
 import python from "highlight.js/lib/languages/python";
@@ -123,6 +124,60 @@ async function openInEditor(path: string, line: number) {
   }
 }
 
+// Lucide's "copy" icon, inlined the same way the folder-mode "x" icon is
+// (no React here, so react-icons doesn't apply — raw SVG matching the same
+// icon set). Reads cleaner than a paper-plane at 13px, and "copy" is the
+// more literally accurate affordance anyway (it copies to the clipboard).
+const SEND_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+
+interface AgentContextItem {
+  path: string;
+  start_line: number;
+  end_line: number;
+  chunk_kind: string;
+  score?: number;
+  content: string;
+}
+
+// Plain text, not JSON or markdown: this is meant to be pasted straight into
+// a chat with a coding agent (Claude Code, Codex, whatever), not parsed by
+// a program, so it should read the way a human would hand this context over.
+function formatAgentContext(query: string, item: AgentContextItem): string {
+  const scoreSuffix = item.score !== undefined ? `, score ${item.score.toFixed(2)}` : "";
+  const header = `${item.path}:${item.start_line}-${item.end_line} (${item.chunk_kind}${scoreSuffix})`;
+  return `query: ${query}\n\n${header}\n${item.content}`;
+}
+
+// Copies the formatted context and flips the button into a "sent" state
+// briefly, so clicking it gives the same kind of feedback a copy button
+// anywhere else does, instead of silently doing something in the background.
+async function sendToAgent(button: HTMLButtonElement, query: string, item: AgentContextItem) {
+  try {
+    await writeText(formatAgentContext(query, item));
+    button.classList.add("sent");
+    button.title = "copied";
+    window.setTimeout(() => {
+      button.classList.remove("sent");
+      button.title = "send to agent";
+    }, 1200);
+  } catch (err) {
+    console.error("send to agent failed", err);
+  }
+}
+
+function sendButton(onClick: (button: HTMLButtonElement) => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = "send-btn";
+  btn.title = "send to agent";
+  btn.innerHTML = SEND_ICON_SVG;
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClick(btn);
+  });
+  return btn;
+}
+
 // A code-chunk result (function/impl/class/interface/...) already carries
 // its exact start line from the index — no need to re-score the file
 // line-by-line at click time the way plain "file"-kind results (unchunked
@@ -206,7 +261,7 @@ function renderError(message: string) {
 // than joining every snippet into one paragraph — concatenating sentences
 // pulled from unrelated files reads as an incoherent run-on, especially once
 // more than one folder is watched.
-function renderCitation(citation: Citation): HTMLElement {
+function renderCitation(citation: Citation, query: string): HTMLElement {
   const li = document.createElement("li");
   li.className = "answer clickable";
   li.title = `open ${basename(citation.path)} at line ${citation.start_line}`;
@@ -239,6 +294,21 @@ function renderCitation(citation: Citation): HTMLElement {
   source.appendChild(label);
   li.appendChild(source);
 
+  // Citations already carry their chunk's full text from the index, so
+  // there's no extra fetch needed here (unlike the plain-result button
+  // below, which has to read the chunk off disk first).
+  li.appendChild(
+    sendButton((btn) =>
+      sendToAgent(btn, query, {
+        path: citation.path,
+        start_line: citation.start_line,
+        end_line: citation.end_line,
+        chunk_kind: citation.chunk_kind,
+        content: citation.snippet,
+      })
+    )
+  );
+
   return li;
 }
 
@@ -247,7 +317,7 @@ function renderResponse(response: SearchResponse, query: string) {
   resultsEl.innerHTML = "";
 
   for (const citation of response.citations) {
-    resultsEl.appendChild(renderCitation(citation));
+    resultsEl.appendChild(renderCitation(citation, query));
   }
 
   for (const r of response.results) {
@@ -267,6 +337,32 @@ function renderResponse(response: SearchResponse, query: string) {
     li.appendChild(iconImg(fileIconUrl(r.path)));
     li.appendChild(name);
     li.appendChild(path);
+    // Unlike a citation, a plain result doesn't carry its chunk's content
+    // (SearchResult is just path/score/line-range) — fetched from disk on
+    // click via read_chunk_preview instead of bloating every search
+    // response with content the UI usually doesn't need.
+    li.appendChild(
+      sendButton(async (btn) => {
+        let content = "";
+        try {
+          content = await invoke<string>("read_chunk_preview", {
+            path: r.path,
+            startLine: r.start_line,
+            endLine: r.end_line,
+          });
+        } catch (err) {
+          console.error("read_chunk_preview failed", err);
+        }
+        await sendToAgent(btn, query, {
+          path: r.path,
+          start_line: r.start_line,
+          end_line: r.end_line,
+          chunk_kind: r.chunk_kind,
+          score: r.score,
+          content,
+        });
+      })
+    );
     resultsEl.appendChild(li);
   }
 

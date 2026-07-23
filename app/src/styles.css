@@ -117,7 +117,8 @@ body {
 }
 
 .answer {
-  padding: 6px 12px;
+  position: relative;
+  padding: 6px 34px 6px 12px;
   margin: 10px 0;
   border-radius: 8px;
 }
@@ -302,4 +303,54 @@ body {
 
 .unwatch-btn:hover {
   color: white;
+}
+
+.send-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  line-height: 0;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+
+.send-btn svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.result .send-btn {
+  margin-left: auto;
+}
+
+.answer .send-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+.result:hover .send-btn,
+.answer:hover .send-btn {
+  opacity: 1;
+}
+
+.send-btn:hover {
+  color: white;
+}
+
+/* Color flash, not text, to confirm the copy landed without needing the row
+   to grow/shrink or a toast to appear and vanish. Same blue as function-name
+   syntax highlighting (.hljs-title.function_), not a separate accent color. */
+.send-btn.sent {
+  opacity: 1;
+  color: #2f83fc;
 }
