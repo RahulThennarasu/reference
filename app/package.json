@@ -7,11 +7,15 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "postinstall": "node -e \"require('fs').cpSync('node_modules/vscode-material-icons/generated/icons', 'public/material-icons', { recursive: true })\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "dompurify": "^3.4.12",
+    "marked": "^18.0.7",
+    "vscode-material-icons": "^0.1.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

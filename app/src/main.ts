@@ -1,6 +1,40 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import {
+  getIconForDirectoryPath,
+  getIconUrlByName,
+  getIconUrlForFilePath,
+} from "vscode-material-icons";
+import { parseInline } from "marked";
+import DOMPurify from "dompurify";
+
+// Answer snippets are a single extracted sentence/table-row, not a full
+// document — inline-only rendering (code spans, bold, links) is what
+// actually shows up in practice, so block-level parsing isn't needed.
+// Sanitized because the source is arbitrary indexed file content, not
+// something we authored.
+function renderInlineMarkdown(text: string): string {
+  return DOMPurify.sanitize(parseInline(text) as string);
+}
+
+const ICONS_URL = "/material-icons";
+
+function fileIconUrl(path: string): string {
+  return getIconUrlForFilePath(path, ICONS_URL);
+}
+
+function folderIconUrl(path: string): string {
+  return getIconUrlByName(getIconForDirectoryPath(path), ICONS_URL);
+}
+
+function iconImg(src: string): HTMLImageElement {
+  const icon = document.createElement("img");
+  icon.className = "row-icon";
+  icon.src = src;
+  icon.alt = "";
+  return icon;
+}
 
 interface SearchResult {
   path: string;
@@ -35,6 +69,7 @@ let resultsEl: HTMLElement | null;
 let folderMode = false;
 let folderSuggestions: string[] = [];
 let folderSelectedIndex = 0;
+let watchedFolders: string[] = [];
 
 function basename(path: string): string {
   return path.replace(/\/$/, "").split("/").pop() ?? path;
@@ -87,7 +122,7 @@ function renderAnswer(answer: Answer): HTMLElement {
 
   const summary = document.createElement("p");
   summary.className = "answer-summary";
-  summary.textContent = answer.summary;
+  summary.innerHTML = renderInlineMarkdown(answer.summary);
   li.appendChild(summary);
 
   const sources = document.createElement("div");
@@ -95,8 +130,16 @@ function renderAnswer(answer: Answer): HTMLElement {
   for (const citation of answer.citations) {
     const chip = document.createElement("span");
     chip.className = "source-chip";
-    chip.textContent = basename(citation.path);
     chip.title = citation.path;
+
+    const icon = iconImg(fileIconUrl(citation.path));
+    icon.classList.add("source-icon");
+
+    const label = document.createElement("span");
+    label.textContent = basename(citation.path);
+
+    chip.appendChild(icon);
+    chip.appendChild(label);
     sources.appendChild(chip);
   }
   li.appendChild(sources);
@@ -124,6 +167,7 @@ function renderResponse(response: SearchResponse) {
     path.className = "result-path";
     path.textContent = dirname(r.path);
 
+    li.appendChild(iconImg(fileIconUrl(r.path)));
     li.appendChild(name);
     li.appendChild(path);
     resultsEl.appendChild(li);
@@ -132,29 +176,95 @@ function renderResponse(response: SearchResponse) {
   resize();
 }
 
-function renderFolderSuggestions() {
+async function unwatchFolder(folder: string) {
+  try {
+    await invoke("stop_watch", { folder });
+  } catch (err) {
+    console.error("stop_watch failed", err);
+  }
+  await refreshWatchedFolders();
+  renderFolderMode();
+}
+
+function renderFolderMode() {
   if (!resultsEl) return;
   const list = resultsEl;
   list.innerHTML = "";
 
-  folderSuggestions.forEach((path, i) => {
-    const li = document.createElement("li");
-    li.className = "result suggestion" + (i === folderSelectedIndex ? " selected" : "");
+  if (watchedFolders.length > 0) {
+    const label = document.createElement("li");
+    label.className = "section-label";
+    label.textContent = "watching";
+    list.appendChild(label);
 
-    const name = document.createElement("span");
-    name.className = "result-name";
-    name.textContent = basename(path);
+    for (const folder of watchedFolders) {
+      const li = document.createElement("li");
+      li.className = "result watched-folder";
 
-    const dir = document.createElement("span");
-    dir.className = "result-path";
-    dir.textContent = dirname(path);
+      const name = document.createElement("span");
+      name.className = "result-name";
+      name.textContent = basename(folder);
 
-    li.appendChild(name);
-    li.appendChild(dir);
-    list.appendChild(li);
-  });
+      const dir = document.createElement("span");
+      dir.className = "result-path";
+      dir.textContent = folder;
+
+      const remove = document.createElement("button");
+      remove.className = "unwatch-btn";
+      // Lucide's "x" icon, inlined (no React here, so react-icons doesn't
+      // apply — this is the same style icon set, just used as raw SVG).
+      remove.innerHTML =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+      remove.title = `Stop watching ${folder}`;
+      remove.addEventListener("click", (e) => {
+        e.stopPropagation();
+        unwatchFolder(folder);
+      });
+
+      li.appendChild(iconImg(folderIconUrl(folder)));
+      li.appendChild(name);
+      li.appendChild(dir);
+      li.appendChild(remove);
+      list.appendChild(li);
+    }
+  }
+
+  if (folderSuggestions.length > 0) {
+    if (watchedFolders.length > 0) {
+      const label = document.createElement("li");
+      label.className = "section-label";
+      label.textContent = "add a folder";
+      list.appendChild(label);
+    }
+
+    folderSuggestions.forEach((path, i) => {
+      const li = document.createElement("li");
+      li.className = "result suggestion" + (i === folderSelectedIndex ? " selected" : "");
+
+      const name = document.createElement("span");
+      name.className = "result-name";
+      name.textContent = basename(path);
+
+      const dir = document.createElement("span");
+      dir.className = "result-path";
+      dir.textContent = dirname(path);
+
+      li.appendChild(iconImg(folderIconUrl(path)));
+      li.appendChild(name);
+      li.appendChild(dir);
+      list.appendChild(li);
+    });
+  }
 
   resize();
+}
+
+async function refreshWatchedFolders() {
+  try {
+    watchedFolders = await invoke<string[]>("list_watched");
+  } catch (err) {
+    console.error("list_watched failed", err);
+  }
 }
 
 let folderDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -168,7 +278,7 @@ function updateFolderSuggestions() {
     try {
       folderSuggestions = await invoke<string[]>("list_dir_suggestions", { partial });
       folderSelectedIndex = 0;
-      renderFolderSuggestions();
+      renderFolderMode();
     } catch (err) {
       console.error("list_dir_suggestions failed", err);
     }
@@ -190,6 +300,9 @@ async function enterFolderMode() {
   searchInputEl.placeholder = FOLDER_PLACEHOLDER;
   searchInputEl.focus();
   searchInputEl.setSelectionRange(searchInputEl.value.length, searchInputEl.value.length);
+
+  await refreshWatchedFolders();
+  renderFolderMode();
   updateFolderSuggestions();
 }
 
@@ -318,13 +431,13 @@ window.addEventListener("DOMContentLoaded", () => {
       e.preventDefault();
       if (folderSuggestions.length > 0) {
         folderSelectedIndex = Math.min(folderSelectedIndex + 1, folderSuggestions.length - 1);
-        renderFolderSuggestions();
+        renderFolderMode();
       }
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       if (folderSuggestions.length > 0) {
         folderSelectedIndex = Math.max(folderSelectedIndex - 1, 0);
-        renderFolderSuggestions();
+        renderFolderMode();
       }
     } else if (e.key === "Enter") {
       e.preventDefault();

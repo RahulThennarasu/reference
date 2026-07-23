@@ -1,5 +1,7 @@
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use anyhow::Result;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -75,14 +77,24 @@ pub fn count_indexable_files(folder: &Path, cap: usize) -> usize {
 /// Indexes every existing text file under `folder`, then watches it for
 /// create/modify events and keeps the index current. Files matched by any
 /// `.gitignore` under `folder` (build output, dependencies, `.git`, etc.)
-/// are skipped in both the initial scan and live updates.
-pub async fn watch(folder: &Path, embedder: &Embedder, store: &Store) -> Result<()> {
+/// are skipped in both the initial scan and live updates. Returns once
+/// `stop` is set to `true` from another thread, so callers can cancel an
+/// in-progress watch (e.g. when the user un-watches a folder).
+pub async fn watch(
+    folder: &Path,
+    embedder: &Embedder,
+    store: &Store,
+    stop: Arc<AtomicBool>,
+) -> Result<()> {
     println!("indexing existing files under {}", folder.display());
     for entry in WalkBuilder::new(folder)
         .build()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
     {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         if let Err(e) = index_file(embedder, store, entry.path()).await {
             eprintln!("failed to index {}: {e}", entry.path().display());
         }
@@ -95,7 +107,18 @@ pub async fn watch(folder: &Path, embedder: &Embedder, store: &Store) -> Result<
     watcher.watch(folder, RecursiveMode::Recursive)?;
 
     println!("watching {} for changes...", folder.display());
-    for res in rx {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            println!("stopped watching {}", folder.display());
+            return Ok(());
+        }
+
+        let res = match rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(res) => res,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+
         let event = match res {
             Ok(event) => event,
             Err(e) => {
@@ -121,6 +144,4 @@ pub async fn watch(folder: &Path, embedder: &Embedder, store: &Store) -> Result<
             }
         }
     }
-
-    Ok(())
 }

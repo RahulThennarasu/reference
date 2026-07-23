@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -45,7 +47,7 @@ async fn main() -> Result<()> {
         Command::Watch => {
             let folder = PathBuf::from(WATCH_FOLDER);
             std::fs::create_dir_all(&folder)?;
-            watcher::watch(&folder, &embedder, &store).await?;
+            watcher::watch(&folder, &embedder, &store, Arc::new(AtomicBool::new(false))).await?;
         }
         Command::Search { query, top_k } => {
             let embedding = embedder.embed(&query)?;

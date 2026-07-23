@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use reference_core::embedding::Embedder;
@@ -17,13 +18,40 @@ use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 // This should move to a real app-data directory (via tauri's path resolver)
 // before shipping.
 const DB_URI: &str = "../data/reference-index";
+const WATCHED_FOLDERS_FILE: &str = "../data/watched_folders.json";
 
 struct AppState {
     embedder: Arc<Embedder>,
     store: Arc<Store>,
-    // Each entry gets its own background watch thread; re-adding an
-    // already-watched folder is a no-op instead of spawning a duplicate.
-    watching: Mutex<HashSet<PathBuf>>,
+    // Each entry gets its own background watch thread plus the flag used to
+    // stop it; re-adding an already-watched folder is a no-op instead of
+    // spawning a duplicate.
+    watching: Mutex<HashMap<PathBuf, Arc<AtomicBool>>>,
+}
+
+fn load_watched_folders() -> Vec<String> {
+    std::fs::read_to_string(WATCHED_FOLDERS_FILE)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_watched_folders(state: &AppState) {
+    let folders: Vec<String> = match state.watching.lock() {
+        Ok(watching) => watching.keys().map(|p| p.to_string_lossy().to_string()).collect(),
+        Err(e) => {
+            eprintln!("failed to lock watching state for persistence: {e}");
+            return;
+        }
+    };
+    match serde_json::to_string(&folders) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(WATCHED_FOLDERS_FILE, json) {
+                eprintln!("failed to persist watched folders: {e}");
+            }
+        }
+        Err(e) => eprintln!("failed to serialize watched folders: {e}"),
+    }
 }
 
 #[derive(Serialize)]
@@ -119,9 +147,11 @@ fn is_too_broad(path: &Path) -> bool {
 /// for changes. Each distinct folder gets its own thread; calling this again
 /// with a folder that's already being watched is a no-op. Refuses folders
 /// that are obviously too broad, or that have an unreasonable number of
-/// indexable files, rather than silently embedding all of them.
-#[tauri::command]
-fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
+/// indexable files, rather than silently embedding all of them. Persists the
+/// updated folder list to disk so it survives app restarts. Plain function
+/// (not a command) so both the `start_watch` command and startup restoration
+/// can share it without going through Tauri's `State` extractor.
+fn start_watching_folder(state: &AppState, folder: String) -> Result<(), String> {
     let path = PathBuf::from(&folder);
 
     if is_too_broad(&path) {
@@ -152,12 +182,15 @@ fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String>
         }
     }
 
+    let stop = Arc::new(AtomicBool::new(false));
     {
         let mut watching = state.watching.lock().map_err(|e| e.to_string())?;
-        if !watching.insert(path.clone()) {
+        if watching.contains_key(&path) {
             return Ok(());
         }
+        watching.insert(path.clone(), stop.clone());
     }
+    save_watched_folders(state);
 
     let embedder = state.embedder.clone();
     let store = state.store.clone();
@@ -173,7 +206,7 @@ fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String>
                 return;
             }
         };
-        if let Err(e) = rt.block_on(watcher::watch(&path, &embedder, &store)) {
+        if let Err(e) = rt.block_on(watcher::watch(&path, &embedder, &store, stop)) {
             eprintln!("watch loop exited with error: {e}");
         }
     });
@@ -182,12 +215,29 @@ fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String>
 }
 
 #[tauri::command]
+fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
+    start_watching_folder(&state, folder)
+}
+
+/// Stops watching `folder`: signals its background thread to exit (it
+/// notices within ~300ms) and drops it from the persisted folder list.
+#[tauri::command]
+fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
+    let path = PathBuf::from(&folder);
+    {
+        let mut watching = state.watching.lock().map_err(|e| e.to_string())?;
+        if let Some(stop) = watching.remove(&path) {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+    save_watched_folders(&state);
+    Ok(())
+}
+
+#[tauri::command]
 fn list_watched(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let watching = state.watching.lock().map_err(|e| e.to_string())?;
-    Ok(watching
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect())
+    Ok(watching.keys().map(|p| p.to_string_lossy().to_string()).collect())
 }
 
 #[tauri::command]
@@ -259,8 +309,14 @@ pub fn run() {
     let state = AppState {
         embedder: Arc::new(embedder),
         store: Arc::new(store),
-        watching: Mutex::new(HashSet::new()),
+        watching: Mutex::new(HashMap::new()),
     };
+
+    for folder in load_watched_folders() {
+        if let Err(e) = start_watching_folder(&state, folder.clone()) {
+            eprintln!("failed to restore watch for {folder}: {e}");
+        }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -268,6 +324,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             search,
             start_watch,
+            stop_watch,
             list_watched,
             home_dir,
             list_dir_suggestions

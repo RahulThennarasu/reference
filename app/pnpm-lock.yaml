@@ -14,6 +14,15 @@ importers:
       '@tauri-apps/plugin-opener':
         specifier: ^2
         version: 2.5.4
+      dompurify:
+        specifier: ^3.4.12
+        version: 3.4.12
+      marked:
+        specifier: ^18.0.7
+        version: 18.0.7
+      vscode-material-icons:
+        specifier: ^0.1.1
+        version: 0.1.1
     devDependencies:
       '@tauri-apps/cli':
         specifier: ^2
@@ -388,6 +397,12 @@ packages:
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
+  '@types/trusted-types@2.0.7':
+    resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
+
+  dompurify@3.4.12:
+    resolution: {integrity: sha512-zQvGet8Z2sWbQhCmfFz/T5QWH2oBmjnqK3qvOjaqaNLrLEF912WamU+ohnTp0TCep/MFVHpdJuCZEdFOdTnEFg==}
+
   esbuild@0.25.12:
     resolution: {integrity: sha512-bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==}
     engines: {node: '>=18'}
@@ -406,6 +421,11 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  marked@18.0.7:
+    resolution: {integrity: sha512-iDVQ5ldaiKXn6b2JroX5kgRfmwgqolW7NpaEzTl1k/2Zh1njIEN9yniyLV/mOvWwtsE8OGgkjsCYvijuPk1dtA==}
+    engines: {node: '>= 20'}
+    hasBin: true
 
   nanoid@3.3.16:
     resolution: {integrity: sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q==}
@@ -480,6 +500,9 @@ packages:
         optional: true
       yaml:
         optional: true
+
+  vscode-material-icons@0.1.1:
+    resolution: {integrity: sha512-GsoEEF8Tbb0yUFQ6N6FPvh11kFkL9F95x0FkKlbbfRQN9eFms67h+L3t6b9cUv58dSn2gu8kEhNfoESVCrz4ag==}
 
 snapshots:
 
@@ -691,6 +714,13 @@ snapshots:
 
   '@types/estree@1.0.9': {}
 
+  '@types/trusted-types@2.0.7':
+    optional: true
+
+  dompurify@3.4.12:
+    optionalDependencies:
+      '@types/trusted-types': 2.0.7
+
   esbuild@0.25.12:
     optionalDependencies:
       '@esbuild/aix-ppc64': 0.25.12
@@ -726,6 +756,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  marked@18.0.7: {}
 
   nanoid@3.3.16: {}
 
@@ -789,3 +821,5 @@ snapshots:
       tinyglobby: 0.2.17
     optionalDependencies:
       fsevents: 2.3.3
+
+  vscode-material-icons@0.1.1: {}
