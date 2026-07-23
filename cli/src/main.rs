@@ -57,12 +57,11 @@ async fn main() -> Result<()> {
             }
 
             if synthesize::is_question(&query) && !hits.is_empty() {
-                let answer = synthesize::synthesize(&embedder, &query, &hits)?;
-                println!("{}\n", answer.summary);
-                for citation in &answer.citations {
-                    println!("  source: {}", citation.path);
+                let citations = synthesize::synthesize(&embedder, &query, &hits)?;
+                for citation in &citations {
+                    println!("{}", citation.snippet);
+                    println!("  source: {}\n", citation.path);
                 }
-                println!();
             }
 
             for hit in hits {

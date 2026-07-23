@@ -20,10 +20,6 @@ pub struct Citation {
     pub snippet: String,
 }
 
-pub struct Answer {
-    pub summary: String,
-    pub citations: Vec<Citation>,
-}
 
 /// Heuristic for whether a query looks like a question rather than a
 /// filename/keyword search — only question-shaped queries get a synthesized
@@ -45,10 +41,32 @@ pub fn is_question(query: &str) -> bool {
         .any(|w| q == *w || q.starts_with(&format!("{w} ")))
 }
 
+/// Splits `line` on '.'/'!'/'?' only when followed by whitespace or the end
+/// of the line — a bare `.` inside a URL or version string (`marketplace.
+/// visualstudio.com`, `v2.1`) has no trailing space, so it's left alone
+/// instead of chopping the sentence off mid-token.
+fn split_line_into_sentences(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut sentences = Vec::new();
+    let mut start = 0;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        let is_terminator = matches!(b, b'.' | b'!' | b'?');
+        let followed_by_boundary = i + 1 >= bytes.len() || bytes[i + 1] == b' ';
+        if is_terminator && followed_by_boundary {
+            sentences.push(line[start..=i].trim());
+            start = i + 1;
+        }
+    }
+    if start < line.len() {
+        sentences.push(line[start..].trim());
+    }
+    sentences
+}
+
 fn split_sentences(text: &str) -> Vec<&str> {
     text.split('\n')
-        .flat_map(|line| line.split_inclusive(['.', '!', '?']))
-        .map(|s| s.trim())
+        .flat_map(split_line_into_sentences)
         // Markdown headings ("# reference") are short, title-like, and
         // essentially never the actual answer to anything — but a small
         // bi-encoder can still occasionally score one anomalously high
@@ -73,7 +91,7 @@ fn is_prose_file(path: &str) -> bool {
 /// single sentence whose embedding is closest to the query and cites it. No
 /// generative model involved — every word in the answer comes verbatim from
 /// a source file, kept local and fast.
-pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Result<Answer> {
+pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Result<Vec<Citation>> {
     let query_embedding = embedder.embed(query)?;
     let mut citations = Vec::new();
 
@@ -108,11 +126,5 @@ pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Resul
         });
     }
 
-    let summary = citations
-        .iter()
-        .map(|c| c.snippet.clone())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    Ok(Answer { summary, citations })
+    Ok(citations)
 }

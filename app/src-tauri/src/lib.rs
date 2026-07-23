@@ -67,15 +67,12 @@ struct Citation {
 }
 
 #[derive(Serialize)]
-struct Answer {
-    summary: String,
-    citations: Vec<Citation>,
-}
-
-#[derive(Serialize)]
 struct SearchResponse {
     results: Vec<SearchResult>,
-    answer: Option<Answer>,
+    // Each citation stands on its own (snippet + source file) — deliberately
+    // not collapsed into one joined paragraph, since concatenating snippets
+    // pulled from unrelated files reads as an incoherent run-on sentence.
+    citations: Vec<Citation>,
 }
 
 // Answer synthesis needs a much wider candidate pool than the results list
@@ -99,19 +96,14 @@ async fn search(
         .await
         .map_err(|e| e.to_string())?;
 
-    let answer = if synthesize::is_question(&query) && !hits.is_empty() {
-        let synthesized =
-            synthesize::synthesize(&state.embedder, &query, &hits).map_err(|e| e.to_string())?;
-        (!synthesized.citations.is_empty()).then(|| Answer {
-            summary: synthesized.summary,
-            citations: synthesized
-                .citations
-                .into_iter()
-                .map(|c| Citation { path: c.path, snippet: c.snippet })
-                .collect(),
-        })
+    let citations = if synthesize::is_question(&query) && !hits.is_empty() {
+        synthesize::synthesize(&state.embedder, &query, &hits)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|c| Citation { path: c.path, snippet: c.snippet })
+            .collect()
     } else {
-        None
+        Vec::new()
     };
 
     let results = hits
@@ -120,7 +112,7 @@ async fn search(
         .map(|h| SearchResult { path: h.path, score: h.score })
         .collect();
 
-    Ok(SearchResponse { results, answer })
+    Ok(SearchResponse { results, citations })
 }
 
 // A hard cap, not a soft warning: past this many files, something has

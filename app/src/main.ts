@@ -46,14 +46,9 @@ interface Citation {
   snippet: string;
 }
 
-interface Answer {
-  summary: string;
-  citations: Citation[];
-}
-
 interface SearchResponse {
   results: SearchResult[];
-  answer: Answer | null;
+  citations: Citation[];
 }
 
 const COLLAPSED_HEIGHT = 64;
@@ -116,33 +111,32 @@ function renderError(message: string) {
   resize();
 }
 
-function renderAnswer(answer: Answer): HTMLElement {
+// Each citation renders as its own block (snippet + one source line) rather
+// than joining every snippet into one paragraph — concatenating sentences
+// pulled from unrelated files reads as an incoherent run-on, especially once
+// more than one folder is watched.
+function renderCitation(citation: Citation): HTMLElement {
   const li = document.createElement("li");
   li.className = "answer";
 
   const summary = document.createElement("p");
   summary.className = "answer-summary";
-  summary.innerHTML = renderInlineMarkdown(answer.summary);
+  summary.innerHTML = renderInlineMarkdown(citation.snippet);
   li.appendChild(summary);
 
-  const sources = document.createElement("div");
-  sources.className = "answer-sources";
-  for (const citation of answer.citations) {
-    const chip = document.createElement("span");
-    chip.className = "source-chip";
-    chip.title = citation.path;
+  const source = document.createElement("span");
+  source.className = "source-chip";
+  source.title = citation.path;
 
-    const icon = iconImg(fileIconUrl(citation.path));
-    icon.classList.add("source-icon");
+  const icon = iconImg(fileIconUrl(citation.path));
+  icon.classList.add("source-icon");
 
-    const label = document.createElement("span");
-    label.textContent = basename(citation.path);
+  const label = document.createElement("span");
+  label.textContent = basename(citation.path);
 
-    chip.appendChild(icon);
-    chip.appendChild(label);
-    sources.appendChild(chip);
-  }
-  li.appendChild(sources);
+  source.appendChild(icon);
+  source.appendChild(label);
+  li.appendChild(source);
 
   return li;
 }
@@ -151,8 +145,8 @@ function renderResponse(response: SearchResponse) {
   if (!resultsEl) return;
   resultsEl.innerHTML = "";
 
-  if (response.answer) {
-    resultsEl.appendChild(renderAnswer(response.answer));
+  for (const citation of response.citations) {
+    resultsEl.appendChild(renderCitation(citation));
   }
 
   for (const r of response.results) {
