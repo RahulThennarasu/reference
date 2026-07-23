@@ -154,6 +154,93 @@ body {
   font-weight: 700;
 }
 
+.code-block {
+  margin: 0 0 6px;
+  padding: 0;
+  overflow: auto;
+  max-height: 280px;
+  scrollbar-width: none; /* Firefox */
+}
+
+.code-block::-webkit-scrollbar {
+  display: none; /* the webview is WebKit-based, this is the one that matters */
+}
+
+.code-block code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 4;
+  color: #f0f2f5;
+}
+
+/* High-contrast token palette, tuned against the app's near-black
+   background — saturated jewel tones rather than pale/pastel hljs-theme
+   colors, so tokens read as deep and rich instead of washed out while
+   still landing well above WCAG contrast against the dark background. */
+.hljs-comment,
+.hljs-quote {
+  color: #7c8598;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-operator {
+  color: #ff2d95;
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+  color: #12b76a;
+}
+
+.hljs-number,
+.hljs-literal {
+  color: #ff8b1a;
+}
+
+.hljs-title.function_,
+.hljs-title.class_,
+.hljs-title,
+.hljs-section {
+  color: #2f83fc;
+  font-weight: 600;
+}
+
+.hljs-type,
+.hljs-class,
+.hljs-built_in {
+  color: #8b5cf6;
+}
+
+.hljs-attr,
+.hljs-property,
+.hljs-attribute,
+.hljs-params {
+  color: #c4c9d4;
+}
+
+.hljs-variable,
+.hljs-name,
+.hljs-tag {
+  color: #f0f2f5;
+}
+
+.hljs-meta,
+.hljs-deletion {
+  color: #ef4444;
+}
+
+.hljs-punctuation {
+  color: #7c8598;
+}
+
 .source-chip {
   display: inline-flex;
   align-items: center;

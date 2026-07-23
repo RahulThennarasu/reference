@@ -60,12 +60,15 @@ async fn main() -> Result<()> {
                 let citations = synthesize::synthesize(&embedder, &query, &hits)?;
                 for citation in &citations {
                     println!("{}", citation.snippet);
-                    println!("  source: {}\n", citation.path);
+                    println!("  source: {}:{}\n", citation.path, citation.start_line);
                 }
             }
 
             for hit in hits {
-                println!("{:.4}  {}", hit.score, hit.path);
+                println!(
+                    "{:.4}  {}:{}-{} [{}]",
+                    hit.score, hit.path, hit.start_line, hit.end_line, hit.chunk_kind
+                );
             }
         }
     }

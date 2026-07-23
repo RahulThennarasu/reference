@@ -9,8 +9,9 @@ use ignore::WalkBuilder;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use walkdir::WalkDir;
 
+use crate::chunk;
 use crate::embedding::Embedder;
-use crate::store::Store;
+use crate::store::{ChunkRecord, Store};
 
 /// Reads a file as UTF-8 text. Returns `None` for files that aren't valid
 /// text (binaries, etc.) so they're silently skipped rather than indexed
@@ -43,14 +44,37 @@ async fn index_file(embedder: &Embedder, store: &Store, path: &Path) -> Result<(
         return Ok(());
     }
 
-    let embedding = embedder.embed(&content)?;
     // Canonicalize so the same file always upserts under the same key,
     // regardless of whether it was reached via the initial walk (relative
     // to the watch root) or a notify event (already absolute).
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let path_str = canonical.to_string_lossy().to_string();
-    store.upsert(&path_str, &content, embedding).await?;
-    println!("indexed {path_str}");
+
+    // Parse into function/impl-level chunks when a chunker exists for this
+    // extension; a missing chunker or a parse failure (syntax error in a
+    // WIP file, binary misdetected as text) falls back to one whole-file
+    // chunk rather than dropping the file from the index.
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let chunks = chunk::chunk_or_whole_file(extension, &content);
+    let chunk_count = chunks.len();
+
+    let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+    let embeddings = embedder.embed_batch(&texts)?;
+
+    let records: Vec<ChunkRecord> = chunks
+        .into_iter()
+        .zip(embeddings)
+        .map(|(c, embedding)| ChunkRecord {
+            start_line: c.start_line,
+            end_line: c.end_line,
+            kind: c.kind,
+            content: c.content,
+            embedding,
+        })
+        .collect();
+
+    store.replace_chunks(&path_str, records).await?;
+    println!("indexed {path_str} ({chunk_count} chunk(s))");
     Ok(())
 }
 

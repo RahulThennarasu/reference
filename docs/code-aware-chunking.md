@@ -1,6 +1,6 @@
 # code-aware chunking
 
-status: **proposed, not started**. This is a scoping doc, not an implementation plan to follow blindly — expect it to change once real code proves parts of it wrong.
+status: **phases 1–2 implemented** (Rust, Python, TypeScript/JavaScript). This is a scoping doc, not an implementation plan to follow blindly — expect it to change once real code proves parts of it wrong. Go/others (phase 3) not started, no known need yet.
 
 ## the problem
 
@@ -71,7 +71,7 @@ Proposed: one row per chunk. Key becomes `path + start_line` (a single file can 
 | `path` | Utf8 | unchanged |
 | `start_line` | Int32 | 1-indexed, becomes part of the merge key |
 | `end_line` | Int32 | for citing a range, not just a point |
-| `chunk_kind` | Utf8 | `"function"`, `"class"`, `"file"` (whole-file fallback) — lets the UI show "function" vs "class" vs plain file |
+| `chunk_kind` | Utf8 | `"function"`, `"class"`, `"impl"` (Rust), `"interface"` (TS), `"file"` (whole-file fallback) — lets the UI show what kind of unit matched, not just plain file |
 | `content` | Utf8 | now the chunk's text, not the whole file |
 | `embedding` | FixedSizeList<Float32, 384> | unchanged shape, now per-chunk |
 

@@ -9,6 +9,19 @@ import {
 } from "vscode-material-icons";
 import { parseInline } from "marked";
 import DOMPurify from "dompurify";
+import hljs from "highlight.js/lib/core";
+import rust from "highlight.js/lib/languages/rust";
+import python from "highlight.js/lib/languages/python";
+import typescript from "highlight.js/lib/languages/typescript";
+import javascript from "highlight.js/lib/languages/javascript";
+
+// Only the languages the chunker actually understands (see core/src/chunk.rs)
+// are registered — pulling in hljs's full language bundle would be dead
+// weight for everything else, which is still shown as plain text.
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("javascript", javascript);
 
 // Answer snippets are a single extracted sentence/table-row, not a full
 // document — inline-only rendering (code spans, bold, links) is what
@@ -17,6 +30,47 @@ import DOMPurify from "dompurify";
 // something we authored.
 function renderInlineMarkdown(text: string): string {
   return DOMPurify.sanitize(parseInline(text) as string);
+}
+
+function hljsLanguageForPath(path: string): string | null {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  switch (ext) {
+    case "rs":
+      return "rust";
+    case "py":
+      return "python";
+    case "ts":
+    case "mts":
+    case "cts":
+    case "tsx":
+      return "typescript";
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return "javascript";
+    default:
+      return null;
+  }
+}
+
+// hljs escapes source text internally (it never interprets the input as
+// HTML), so building innerHTML from its output is safe even though the
+// underlying content is arbitrary indexed file text, not something we wrote.
+function renderCodeBlock(path: string, code: string): HTMLElement {
+  const pre = document.createElement("pre");
+  pre.className = "code-block";
+
+  const codeEl = document.createElement("code");
+  const language = hljsLanguageForPath(path);
+  const highlighted = language
+    ? hljs.highlight(code, { language, ignoreIllegals: true }).value
+    : hljs.highlightAuto(code).value;
+
+  codeEl.className = language ? `hljs language-${language}` : "hljs";
+  codeEl.innerHTML = highlighted;
+  pre.appendChild(codeEl);
+  return pre;
 }
 
 const ICONS_URL = "/material-icons";
@@ -40,12 +94,17 @@ function iconImg(src: string): HTMLImageElement {
 interface SearchResult {
   path: string;
   score: number;
+  start_line: number;
+  end_line: number;
+  chunk_kind: string;
 }
 
 interface Citation {
   path: string;
   snippet: string;
-  line: number;
+  start_line: number;
+  end_line: number;
+  chunk_kind: string;
 }
 
 interface SearchResponse {
@@ -64,14 +123,23 @@ async function openInEditor(path: string, line: number) {
   }
 }
 
-async function openResultInEditor(path: string, query: string) {
+// A code-chunk result (function/impl/class/interface/...) already carries
+// its exact start line from the index — no need to re-score the file
+// line-by-line at click time the way plain "file"-kind results (unchunked
+// languages, prose) still do.
+async function openResultInEditor(result: SearchResult, query: string) {
+  if (result.chunk_kind !== "file") {
+    await openInEditor(result.path, result.start_line);
+    return;
+  }
+
   let line = 1;
   try {
-    line = await invoke<number>("find_line", { path, query });
+    line = await invoke<number>("find_line", { path: result.path, query });
   } catch (err) {
     console.error("find_line failed", err);
   }
-  await openInEditor(path, line);
+  await openInEditor(result.path, line);
 }
 
 const COLLAPSED_HEIGHT = 64;
@@ -141,13 +209,21 @@ function renderError(message: string) {
 function renderCitation(citation: Citation): HTMLElement {
   const li = document.createElement("li");
   li.className = "answer clickable";
-  li.title = `open ${basename(citation.path)} at line ${citation.line}`;
-  li.addEventListener("click", () => openInEditor(citation.path, citation.line));
+  li.title = `open ${basename(citation.path)} at line ${citation.start_line}`;
+  li.addEventListener("click", () => openInEditor(citation.path, citation.start_line));
 
-  const summary = document.createElement("p");
-  summary.className = "answer-summary";
-  summary.innerHTML = renderInlineMarkdown(citation.snippet);
-  li.appendChild(summary);
+  // A "file"-kind citation is prose (or an unchunked language's whole-file
+  // blob) — rendered as inline markdown same as before. Anything else came
+  // from the language-aware chunker (function/class/impl/interface) and is
+  // real source code, so it gets a syntax-highlighted code block instead.
+  if (citation.chunk_kind === "file") {
+    const summary = document.createElement("p");
+    summary.className = "answer-summary";
+    summary.innerHTML = renderInlineMarkdown(citation.snippet);
+    li.appendChild(summary);
+  } else {
+    li.appendChild(renderCodeBlock(citation.path, citation.snippet));
+  }
 
   const source = document.createElement("span");
   source.className = "source-chip";
@@ -178,7 +254,7 @@ function renderResponse(response: SearchResponse, query: string) {
     const li = document.createElement("li");
     li.className = "result clickable";
     li.title = `open ${basename(r.path)}`;
-    li.addEventListener("click", () => openResultInEditor(r.path, query));
+    li.addEventListener("click", () => openResultInEditor(r, query));
 
     const name = document.createElement("span");
     name.className = "result-name";

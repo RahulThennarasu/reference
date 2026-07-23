@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{
-    cast::AsArray, types::Float32Type, FixedSizeListArray, RecordBatch, RecordBatchIterator,
-    StringArray,
+    cast::AsArray, types::Float32Type, FixedSizeListArray, Int32Array, RecordBatch,
+    RecordBatchIterator, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -31,6 +31,19 @@ pub struct HybridHit {
     pub path: String,
     pub content: String,
     pub score: f32,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub chunk_kind: String,
+}
+
+/// One chunk of a file (a function, an impl block, or the whole file as a
+/// fallback), already embedded and ready to write.
+pub struct ChunkRecord {
+    pub start_line: i32,
+    pub end_line: i32,
+    pub kind: String,
+    pub content: String,
+    pub embedding: Vec<f32>,
 }
 
 pub struct Store {
@@ -40,6 +53,9 @@ pub struct Store {
 fn schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("path", DataType::Utf8, false),
+        Field::new("start_line", DataType::Int32, false),
+        Field::new("end_line", DataType::Int32, false),
+        Field::new("chunk_kind", DataType::Utf8, false),
         Field::new("content", DataType::Utf8, false),
         Field::new(
             "embedding",
@@ -66,39 +82,74 @@ impl Store {
         Ok(Self { table })
     }
 
-    /// Upserts a single file's embedding, keyed on `path`, via `merge_insert`.
-    pub async fn upsert(&self, path: &str, content: &str, embedding: Vec<f32>) -> Result<()> {
+    /// Replaces every chunk row for `path` with `chunks`. Chunking is a
+    /// one-to-many relationship (one file -> N chunk rows), which
+    /// `merge_insert`'s upsert semantics can't express on their own: it can
+    /// add/update rows but has no way to notice that a function was deleted
+    /// and its row should disappear too. So every re-index deletes all
+    /// existing rows for the exact path first, then inserts the freshly
+    /// parsed chunks via `merge_insert` (keyed on path + start_line) — still
+    /// going through `merge_insert` per this project's write rule, just
+    /// preceded by an explicit delete so stale chunks can't linger.
+    pub async fn replace_chunks(&self, path: &str, chunks: Vec<ChunkRecord>) -> Result<()> {
+        let escaped = path.replace('\'', "''");
+        self.table.delete(&format!("path = '{escaped}'")).await?;
+
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
         let schema = schema();
+        let n = chunks.len();
+        let mut paths = Vec::with_capacity(n);
+        let mut start_lines = Vec::with_capacity(n);
+        let mut end_lines = Vec::with_capacity(n);
+        let mut kinds = Vec::with_capacity(n);
+        let mut contents = Vec::with_capacity(n);
+        let mut embeddings = Vec::with_capacity(n);
+        for c in chunks {
+            paths.push(path.to_string());
+            start_lines.push(c.start_line);
+            end_lines.push(c.end_line);
+            kinds.push(c.kind);
+            contents.push(c.content);
+            embeddings.push(Some(c.embedding.into_iter().map(Some).collect::<Vec<_>>()));
+        }
+
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(StringArray::from(vec![path])),
-                Arc::new(StringArray::from(vec![content])),
+                Arc::new(StringArray::from(paths)),
+                Arc::new(Int32Array::from(start_lines)),
+                Arc::new(Int32Array::from(end_lines)),
+                Arc::new(StringArray::from(kinds)),
+                Arc::new(StringArray::from(contents)),
                 Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                    vec![Some(embedding.into_iter().map(Some).collect::<Vec<_>>())],
+                    embeddings,
                     EMBEDDING_DIM as i32,
                 )),
             ],
         )?;
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
 
-        let mut merge_insert = self.table.merge_insert(&["path"]);
+        let mut merge_insert = self.table.merge_insert(&["path", "start_line"]);
         merge_insert
             .when_matched_update_all(None)
             .when_not_matched_insert_all();
         merge_insert
             .execute(Box::new(reader))
             .await
-            .context("merge_insert upsert failed")?;
+            .context("merge_insert chunk upsert failed")?;
 
         Ok(())
     }
 
-    /// Ranks every indexed file by a blend of semantic similarity (against
+    /// Ranks every indexed chunk by a blend of semantic similarity (against
     /// `query_embedding`) and fuzzy filename match (against `query_text`),
     /// returning the top `k`. Scores every row in the table directly rather
     /// than going through LanceDB's ANN index, which is simple and exact at
-    /// the scale of a personal file index; revisit if that stops being true.
+    /// the scale of a personal file index; revisit if that stops being true
+    /// now that chunking means several rows per file instead of one.
     pub async fn hybrid_search(
         &self,
         query_text: &str,
@@ -110,6 +161,9 @@ impl Store {
             .query()
             .select(Select::Columns(vec![
                 "path".to_string(),
+                "start_line".to_string(),
+                "end_line".to_string(),
+                "chunk_kind".to_string(),
                 "content".to_string(),
                 "embedding".to_string(),
             ]))
@@ -125,6 +179,18 @@ impl Store {
             let paths = batch
                 .column_by_name("path")
                 .context("missing path column")?
+                .as_string::<i32>();
+            let start_lines = batch
+                .column_by_name("start_line")
+                .context("missing start_line column")?
+                .as_primitive::<arrow_array::types::Int32Type>();
+            let end_lines = batch
+                .column_by_name("end_line")
+                .context("missing end_line column")?
+                .as_primitive::<arrow_array::types::Int32Type>();
+            let chunk_kinds = batch
+                .column_by_name("chunk_kind")
+                .context("missing chunk_kind column")?
                 .as_string::<i32>();
             let contents = batch
                 .column_by_name("content")
@@ -151,7 +217,14 @@ impl Store {
                 let fuzzy_sim = fuzzy_raw / (fuzzy_raw + FUZZY_SATURATION);
 
                 let score = SEMANTIC_WEIGHT * semantic_sim + FUZZY_WEIGHT * fuzzy_sim;
-                hits.push(HybridHit { path, content, score });
+                hits.push(HybridHit {
+                    path,
+                    content,
+                    score,
+                    start_line: start_lines.value(i),
+                    end_line: end_lines.value(i),
+                    chunk_kind: chunk_kinds.value(i).to_string(),
+                });
             }
         }
 

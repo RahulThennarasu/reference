@@ -18,7 +18,9 @@ const PROSE_EXTENSIONS: &[&str] = &["md", "txt", "rst", "org", "adoc"];
 pub struct Citation {
     pub path: String,
     pub snippet: String,
-    pub line: usize,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub chunk_kind: String,
 }
 
 /// 1-indexed line number where `needle` first appears in `content`. Falls
@@ -98,22 +100,47 @@ fn is_prose_file(path: &str) -> bool {
         .is_some_and(|ext| PROSE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
 }
 
-/// Extractive answer synthesis: for each of the top-ranked files, picks the
-/// single sentence whose embedding is closest to the query and cites it. No
+/// Any chunk kind other than "file" came from a language-aware chunker
+/// (function, impl, class, interface, ...) and is already a syntactically
+/// complete unit, so citing it verbatim doesn't have the incoherence
+/// problem that citing a naively-split code "sentence" did. A "file" chunk
+/// is either prose or an arbitrary whole-file blob for a language with no
+/// chunker yet, so it doesn't qualify on its own.
+fn is_code_chunk(kind: &str) -> bool {
+    kind != "file"
+}
+
+/// Extractive answer synthesis: for each of the top-ranked chunks, either
+/// cites the whole chunk verbatim (code — already a coherent unit) or picks
+/// the single sentence whose embedding is closest to the query (prose). No
 /// generative model involved — every word in the answer comes verbatim from
 /// a source file, kept local and fast.
 pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Result<Vec<Citation>> {
     let query_embedding = embedder.embed(query)?;
     let mut citations = Vec::new();
 
-    let prose_hits: Vec<&HybridHit> = hits.iter().filter(|h| is_prose_file(&h.path)).collect();
-    let top_score = prose_hits.first().map(|h| h.score).unwrap_or(0.0);
-    let relevant = prose_hits
+    let citable: Vec<&HybridHit> = hits
+        .iter()
+        .filter(|h| is_prose_file(&h.path) || is_code_chunk(&h.chunk_kind))
+        .collect();
+    let top_score = citable.first().map(|h| h.score).unwrap_or(0.0);
+    let relevant = citable
         .into_iter()
         .take(MAX_CITED_FILES)
         .take_while(|h| h.score >= top_score * RELEVANCE_CUTOFF);
 
     for hit in relevant {
+        if is_code_chunk(&hit.chunk_kind) {
+            citations.push(Citation {
+                path: hit.path.clone(),
+                snippet: hit.content.trim().to_string(),
+                start_line: hit.start_line as usize,
+                end_line: hit.end_line as usize,
+                chunk_kind: hit.chunk_kind.clone(),
+            });
+            continue;
+        }
+
         let sentences = split_sentences(&hit.content);
         if sentences.is_empty() {
             continue;
@@ -132,8 +159,18 @@ pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Resul
         }
 
         let snippet = owned[best_idx].clone();
-        let line = line_of(&hit.content, &snippet);
-        citations.push(Citation { path: hit.path.clone(), snippet, line });
+        // `hit.content` is chunk-scoped, not file-scoped, so the line found
+        // within it needs `start_line`'s offset to become a real file line
+        // (today always 1 for prose since prose files aren't chunked yet,
+        // but this stays correct once they are).
+        let line = line_of(&hit.content, &snippet) + (hit.start_line as usize - 1);
+        citations.push(Citation {
+            path: hit.path.clone(),
+            snippet,
+            start_line: line,
+            end_line: line,
+            chunk_kind: hit.chunk_kind.clone(),
+        });
     }
 
     Ok(citations)

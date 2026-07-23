@@ -56,13 +56,18 @@ fn save_watched_folders(state: &AppState) {
 struct SearchResult {
     path: String,
     score: f32,
+    start_line: usize,
+    end_line: usize,
+    chunk_kind: String,
 }
 
 #[derive(Serialize)]
 struct Citation {
     path: String,
     snippet: String,
-    line: usize,
+    start_line: usize,
+    end_line: usize,
+    chunk_kind: String,
 }
 
 #[derive(Serialize)]
@@ -99,7 +104,13 @@ async fn search(
         synthesize::synthesize(&state.embedder, &query, &hits)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(|c| Citation { path: c.path, snippet: c.snippet, line: c.line })
+            .map(|c| Citation {
+                path: c.path,
+                snippet: c.snippet,
+                start_line: c.start_line,
+                end_line: c.end_line,
+                chunk_kind: c.chunk_kind,
+            })
             .collect()
     } else {
         Vec::new()
@@ -108,7 +119,13 @@ async fn search(
     let results = hits
         .into_iter()
         .take(top_k)
-        .map(|h| SearchResult { path: h.path, score: h.score })
+        .map(|h| SearchResult {
+            path: h.path,
+            score: h.score,
+            start_line: h.start_line as usize,
+            end_line: h.end_line as usize,
+            chunk_kind: h.chunk_kind,
+        })
         .collect();
 
     Ok(SearchResponse { results, citations })
