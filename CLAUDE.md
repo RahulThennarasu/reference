@@ -13,7 +13,7 @@ the name reflects the core mechanism: the index doesn't store or duplicate your 
 - **one rust core, not per-platform code.** the watch, embed, store, search pipeline is a single rust codebase. gpu backend (cuda vs metal) should be a config/feature flag via `candle`, not a fork.
 - **no python dependency.** embeddings run through `candle`, not a bundled python runtime. if a task seems to need python, stop and find the rust equivalent first.
 - **local-only, always.** no code path should make a network call for indexing, embedding, or search. if a feature seems to require network access, it's probably out of scope or needs to be explicitly opt-in and clearly surfaced.
-- **writes go through `merge_insert` only.** never write to the lancedb table via `add()` directly in the indexing pipeline, primary keys aren't enforced as a uniqueness constraint on plain writes, so bypassing `merge_insert` risks duplicate rows for the same file. every upsert (new file or changed file) goes through `table::merge_insert` keyed on file path.
+- **writes go through `merge_insert` only.** never write to the lancedb table via `add()` directly in the indexing pipeline, primary keys aren't enforced as a uniqueness constraint on plain writes, so bypassing `merge_insert` risks duplicate rows for the same chunk. every upsert (new/changed file) deletes existing rows for that path first, then goes through `table::merge_insert` keyed on `path + start_line` — a file is chunked into multiple rows now (see `docs/code-aware-chunking.md`), so a plain path-only key can't express "this chunk no longer exists" when a function is deleted.
 - **build in vertical slices, not layers.** get watch, embed, store, search fully working end-to-end for one folder via cli before adding: gpu backend selection, the tauri ui, hybrid fuzzy+semantic ranking, or answer synthesis.
 
 ## current architecture decisions
@@ -24,7 +24,7 @@ the name reflects the core mechanism: the index doesn't store or duplicate your 
 | file watching   | `notify` crate                                                                                  |                                                                                                       |
 | embedding model | all-minilm-l6-v2 via `candle`                                                                   | 384-dim output. cpu first, gpu backend later                                                          |
 | vector db       | lancedb (rust crate, embedded)                                                                  | local filesystem storage, no server process                                                           |
-| upsert          | `table::merge_insert(&["path"])` with `when_matched_update_all` + `when_not_matched_insert_all` |                                                                                                       |
+| upsert          | delete rows for `path`, then `table::merge_insert(&["path", "start_line"])` with `when_matched_update_all` + `when_not_matched_insert_all` | one file -> N chunk rows now, see `docs/code-aware-chunking.md` |
 | index type      | `index::auto`                                                                                   | lancedb auto-selects ivf-pq for vector columns, btree otherwise, no manual index tuning needed for v1 |
 
 ## known gaps / things to verify before relying on them
@@ -36,6 +36,18 @@ the name reflects the core mechanism: the index doesn't store or duplicate your 
 ## how to verify a crate/library claim before building on it
 
 go straight to `docs.rs/<crate-name>/latest` and check the actual struct/trait method list and doc comments, that's generated directly from the crate source, so it's the canonical current api, not commentary about it. don't rely on blog posts, stack overflow, or general knowledge for fast-moving rust crates.
+
+## semantic code search (dogfooding)
+
+this repo is itself indexed by `reference`, chunked at function/class granularity (see `docs/code-aware-chunking.md`).
+
+use it first, before grep, whenever a question names no literal string/identifier to search for and instead describes *behavior* or *intent* — "why don't impl methods get their own chunk", "what stops a WIP file with a syntax error from disappearing from the index", "how does a citation's line number stay correct when the chunk isn't the whole file". grep is still the right tool once you already know the identifier/string you're looking for (a constant name, an error message, a literal number) — this is for the case where you'd otherwise have to guess identifier names to even start grepping.
+
+```
+reference-cli search "<query>" --json
+```
+
+returns `{results: [...], citations: [...]}`, each result carrying `path`, `start_line`, `end_line`, `chunk_kind` (`function`/`class`/`impl`/`interface`/`file`), and `score`. reads `~/.reference/index` — the same index the app UI populates, so results reflect whatever's currently watched, not a separate copy. if it comes back empty, nothing's been watched yet — add a folder from the app (⌘7) first.
 
 ## explicit non-goals (don't build these without discussing first)
 

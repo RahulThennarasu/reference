@@ -7235,6 +7235,8 @@ dependencies = [
  "anyhow",
  "clap",
  "reference-core",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

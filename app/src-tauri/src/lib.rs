@@ -4,19 +4,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use reference_core::embedding::Embedder;
+use reference_core::paths;
 use reference_core::store::Store;
 use reference_core::synthesize;
 use reference_core::watcher;
 use serde::Serialize;
 use tauri::State;
-
-// Deliberately outside src-tauri/: Tauri's dev watcher rebuilds+restarts the
-// app on any change under src-tauri/, and LanceDB writes temp files on every
-// upsert, so pointing the index inside src-tauri/ causes a restart loop.
-// This should move to a real app-data directory (via tauri's path resolver)
-// before shipping.
-const DB_URI: &str = "../data/reference-index";
-const WATCHED_FOLDERS_FILE: &str = "../data/watched_folders.json";
 
 struct AppState {
     embedder: Arc<Embedder>,
@@ -28,7 +21,7 @@ struct AppState {
 }
 
 fn load_watched_folders() -> Vec<String> {
-    std::fs::read_to_string(WATCHED_FOLDERS_FILE)
+    std::fs::read_to_string(paths::default_watched_folders_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
@@ -44,7 +37,7 @@ fn save_watched_folders(state: &AppState) {
     };
     match serde_json::to_string(&folders) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(WATCHED_FOLDERS_FILE, json) {
+            if let Err(e) = std::fs::write(paths::default_watched_folders_path(), json) {
                 eprintln!("failed to persist watched folders: {e}");
             }
         }
@@ -338,11 +331,20 @@ fn list_dir_suggestions(partial: String) -> Result<Vec<String>, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Shared with the CLI (`~/.reference/`) so `reference-cli search` reads
+    // the same index this app's watchers populate, instead of each keeping
+    // its own disconnected database. Also sidesteps the old problem this
+    // constant used to work around: Tauri's dev watcher rebuilds+restarts
+    // the app on any change under src-tauri/, and LanceDB writes temp files
+    // on every upsert — a path under $HOME is outside that tree entirely.
+    std::fs::create_dir_all(paths::default_app_data_dir())
+        .expect("failed to create app data directory");
+
     println!("loading embedding model (all-MiniLM-L6-v2)...");
     let embedder =
         tauri::async_runtime::block_on(Embedder::load()).expect("failed to load embedding model");
-    let store =
-        tauri::async_runtime::block_on(Store::open(DB_URI)).expect("failed to open lancedb store");
+    let store = tauri::async_runtime::block_on(Store::open(&paths::default_db_uri()))
+        .expect("failed to open lancedb store");
 
     let state = AppState {
         embedder: Arc::new(embedder),

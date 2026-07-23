@@ -9,16 +9,16 @@ use candle_core::Device;
 pub fn select() -> Result<Device> {
     let cuda = Device::cuda_if_available(0)?;
     if cuda.is_cuda() {
-        println!("gpu backend: cuda");
+        eprintln!("gpu backend: cuda");
         return Ok(cuda);
     }
 
     let metal = Device::metal_if_available(0)?;
     if metal.is_metal() {
-        println!("gpu backend: metal");
+        eprintln!("gpu backend: metal");
         return Ok(metal);
     }
 
-    println!("gpu backend: none, using cpu");
+    eprintln!("gpu backend: none, using cpu");
     Ok(Device::Cpu)
 }
