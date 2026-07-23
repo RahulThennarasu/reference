@@ -140,13 +140,19 @@ interface AgentContextItem {
   content: string;
 }
 
+function formatContextBlock(item: AgentContextItem): string {
+  const scoreSuffix = item.score !== undefined ? `, score ${item.score.toFixed(2)}` : "";
+  const header = `${item.path}:${item.start_line}-${item.end_line} (${item.chunk_kind}${scoreSuffix})`;
+  return `${header}\n${item.content}`;
+}
+
 // Plain text, not JSON or markdown: this is meant to be pasted straight into
 // a chat with a coding agent (Claude Code, Codex, whatever), not parsed by
 // a program, so it should read the way a human would hand this context over.
-function formatAgentContext(query: string, item: AgentContextItem): string {
-  const scoreSuffix = item.score !== undefined ? `, score ${item.score.toFixed(2)}` : "";
-  const header = `${item.path}:${item.start_line}-${item.end_line} (${item.chunk_kind}${scoreSuffix})`;
-  return `query: ${query}\n\n${header}\n${item.content}`;
+// Multiple items become multiple blocks under one "query:" line rather than
+// separate payloads, so pasting once hands over everything the user picked.
+function formatAgentContext(query: string, items: AgentContextItem[]): string {
+  return `query: ${query}\n\n${items.map(formatContextBlock).join("\n\n")}`;
 }
 
 // Copies the formatted context and flips the button into a "sent" state
@@ -154,7 +160,7 @@ function formatAgentContext(query: string, item: AgentContextItem): string {
 // anywhere else does, instead of silently doing something in the background.
 async function sendToAgent(button: HTMLButtonElement, query: string, item: AgentContextItem) {
   try {
-    await writeText(formatAgentContext(query, item));
+    await writeText(formatAgentContext(query, [item]));
     button.classList.add("sent");
     button.title = "copied";
     window.setTimeout(() => {
@@ -176,6 +182,65 @@ function sendButton(onClick: (button: HTMLButtonElement) => void): HTMLButtonEle
     onClick(btn);
   });
   return btn;
+}
+
+let currentQuery = "";
+// The last rendered response, so the single "copy all" button in the search
+// bar can gather everything currently on screen without needing per-row
+// checkboxes — one button, no selection state to manage or clean up.
+let lastResponse: SearchResponse | null = null;
+
+function updateCopyAllVisibility() {
+  if (!copyAllBtnEl) return;
+  const hasContent = !!lastResponse && lastResponse.citations.length + lastResponse.results.length > 0;
+  copyAllBtnEl.classList.toggle("visible", hasContent);
+}
+
+// Gathers every citation and result currently shown into one clipboard
+// payload. Citations already carry their chunk's content; plain results are
+// fetched from disk in parallel, same as a single result's send button does.
+async function copyAllVisible() {
+  if (!copyAllBtnEl || !lastResponse) return;
+  const response = lastResponse;
+
+  const citationItems: AgentContextItem[] = response.citations.map((c) => ({
+    path: c.path,
+    start_line: c.start_line,
+    end_line: c.end_line,
+    chunk_kind: c.chunk_kind,
+    content: c.snippet,
+  }));
+
+  const resultItems: AgentContextItem[] = await Promise.all(
+    response.results.map(async (r): Promise<AgentContextItem> => {
+      let content = "";
+      try {
+        content = await invoke<string>("read_chunk_preview", {
+          path: r.path,
+          startLine: r.start_line,
+          endLine: r.end_line,
+        });
+      } catch (err) {
+        console.error("read_chunk_preview failed", err);
+      }
+      return {
+        path: r.path,
+        start_line: r.start_line,
+        end_line: r.end_line,
+        chunk_kind: r.chunk_kind,
+        score: r.score,
+        content,
+      };
+    })
+  );
+
+  try {
+    await writeText(formatAgentContext(currentQuery, [...citationItems, ...resultItems]));
+    copyAllBtnEl.classList.add("sent");
+    window.setTimeout(() => copyAllBtnEl?.classList.remove("sent"), 1200);
+  } catch (err) {
+    console.error("copy all failed", err);
+  }
 }
 
 // A code-chunk result (function/impl/class/interface/...) already carries
@@ -206,6 +271,7 @@ const FOLDER_PLACEHOLDER = "type a folder path — tab to complete, enter to wat
 
 let searchInputEl: HTMLInputElement | null;
 let resultsEl: HTMLElement | null;
+let copyAllBtnEl: HTMLButtonElement | null;
 
 let folderMode = false;
 let folderSuggestions: string[] = [];
@@ -250,6 +316,8 @@ async function resize() {
 function renderError(message: string) {
   if (!resultsEl) return;
   resultsEl.innerHTML = "";
+  lastResponse = null;
+  updateCopyAllVisibility();
   const li = document.createElement("li");
   li.className = "result result-error";
   li.textContent = message;
@@ -294,9 +362,6 @@ function renderCitation(citation: Citation, query: string): HTMLElement {
   source.appendChild(label);
   li.appendChild(source);
 
-  // Citations already carry their chunk's full text from the index, so
-  // there's no extra fetch needed here (unlike the plain-result button
-  // below, which has to read the chunk off disk first).
   li.appendChild(
     sendButton((btn) =>
       sendToAgent(btn, query, {
@@ -315,6 +380,9 @@ function renderCitation(citation: Citation, query: string): HTMLElement {
 function renderResponse(response: SearchResponse, query: string) {
   if (!resultsEl) return;
   resultsEl.innerHTML = "";
+  currentQuery = query;
+  lastResponse = response;
+  updateCopyAllVisibility();
 
   for (const citation of response.citations) {
     resultsEl.appendChild(renderCitation(citation, query));
@@ -337,10 +405,6 @@ function renderResponse(response: SearchResponse, query: string) {
     li.appendChild(iconImg(fileIconUrl(r.path)));
     li.appendChild(name);
     li.appendChild(path);
-    // Unlike a citation, a plain result doesn't carry its chunk's content
-    // (SearchResult is just path/score/line-range) — fetched from disk on
-    // click via read_chunk_preview instead of bloating every search
-    // response with content the UI usually doesn't need.
     li.appendChild(
       sendButton(async (btn) => {
         let content = "";
@@ -383,6 +447,8 @@ function renderFolderMode() {
   if (!resultsEl) return;
   const list = resultsEl;
   list.innerHTML = "";
+  lastResponse = null;
+  updateCopyAllVisibility();
 
   if (watchedFolders.length > 0) {
     const label = document.createElement("li");
@@ -508,6 +574,8 @@ function exitFolderMode() {
     searchInputEl.placeholder = DEFAULT_PLACEHOLDER;
   }
   if (resultsEl) resultsEl.innerHTML = "";
+  lastResponse = null;
+  updateCopyAllVisibility();
   resize();
 }
 
@@ -551,6 +619,8 @@ function search() {
   if (!query) {
     pendingQuery = null;
     if (resultsEl) resultsEl.innerHTML = "";
+    lastResponse = null;
+    updateCopyAllVisibility();
     resize();
     return;
   }
@@ -587,6 +657,9 @@ async function runSearch(query: string) {
 window.addEventListener("DOMContentLoaded", () => {
   searchInputEl = document.querySelector("#search-input");
   resultsEl = document.querySelector("#results");
+  copyAllBtnEl = document.querySelector("#copy-all-btn");
+
+  copyAllBtnEl?.addEventListener("click", () => copyAllVisible());
 
   searchInputEl?.addEventListener("input", () => {
     if (folderMode) {

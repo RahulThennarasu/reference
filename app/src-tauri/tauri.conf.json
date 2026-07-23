@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "app",
+  "productName": "reference",
   "version": "0.1.0",
   "identifier": "com.rahulthennarasu.app",
   "build": {

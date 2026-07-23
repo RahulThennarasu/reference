@@ -354,3 +354,52 @@ body {
   opacity: 1;
   color: #2f83fc;
 }
+
+/* One button in the search bar, not a per-row checkbox scheme — clicking it
+   gathers every citation/result currently on screen into a single clipboard
+   payload. Hidden (not just dimmed) until there's actually something to
+   copy, so an empty search doesn't show a dead button. */
+.copy-all-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  line-height: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.9);
+  transition: opacity 0.12s, transform 0.12s, color 0.12s, background 0.12s;
+}
+
+.copy-all-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+
+.copy-all-btn svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.copy-all-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: white;
+}
+
+/* Same blue used for function-name syntax highlighting and the per-row send
+   button's "sent" flash — one consistent accent color across the app rather
+   than introducing a separate green just for this button. */
+.copy-all-btn.sent {
+  color: #2f83fc;
+}
