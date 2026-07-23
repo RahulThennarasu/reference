@@ -62,6 +62,11 @@ body {
   padding: 0 10px 10px;
   overflow-y: auto;
   flex: 1;
+  scrollbar-width: none; /* Firefox */
+}
+
+#results::-webkit-scrollbar {
+  display: none; /* the webview is WebKit-based, this is the one that matters */
 }
 
 .result {
@@ -107,6 +112,15 @@ body {
 .answer {
   padding: 6px 12px;
   margin: 10px 0;
+  border-radius: 8px;
+}
+
+.clickable {
+  cursor: pointer;
+}
+
+.answer.clickable:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .answer-summary {

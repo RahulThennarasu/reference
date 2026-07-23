@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getIconForDirectoryPath,
   getIconUrlByName,
@@ -44,11 +45,33 @@ interface SearchResult {
 interface Citation {
   path: string;
   snippet: string;
+  line: number;
 }
 
 interface SearchResponse {
   results: SearchResult[];
   citations: Citation[];
+}
+
+// VSCode registers this URI scheme itself; no shell-out or `code` CLI
+// dependency needed. Falls back to just opening the file if the line lookup
+// or the open itself fails, rather than doing nothing.
+async function openInEditor(path: string, line: number) {
+  try {
+    await openUrl(`vscode://file${path}:${line}:1`);
+  } catch (err) {
+    console.error("openInEditor failed", err);
+  }
+}
+
+async function openResultInEditor(path: string, query: string) {
+  let line = 1;
+  try {
+    line = await invoke<number>("find_line", { path, query });
+  } catch (err) {
+    console.error("find_line failed", err);
+  }
+  await openInEditor(path, line);
 }
 
 const COLLAPSED_HEIGHT = 64;
@@ -117,7 +140,9 @@ function renderError(message: string) {
 // more than one folder is watched.
 function renderCitation(citation: Citation): HTMLElement {
   const li = document.createElement("li");
-  li.className = "answer";
+  li.className = "answer clickable";
+  li.title = `Open ${basename(citation.path)} at line ${citation.line}`;
+  li.addEventListener("click", () => openInEditor(citation.path, citation.line));
 
   const summary = document.createElement("p");
   summary.className = "answer-summary";
@@ -141,7 +166,7 @@ function renderCitation(citation: Citation): HTMLElement {
   return li;
 }
 
-function renderResponse(response: SearchResponse) {
+function renderResponse(response: SearchResponse, query: string) {
   if (!resultsEl) return;
   resultsEl.innerHTML = "";
 
@@ -151,7 +176,9 @@ function renderResponse(response: SearchResponse) {
 
   for (const r of response.results) {
     const li = document.createElement("li");
-    li.className = "result";
+    li.className = "result clickable";
+    li.title = `Open ${basename(r.path)}`;
+    li.addEventListener("click", () => openResultInEditor(r.path, query));
 
     const name = document.createElement("span");
     name.className = "result-name";
@@ -371,7 +398,7 @@ async function runSearch(query: string) {
       query,
       topK: MAX_VISIBLE_ROWS,
     });
-    renderResponse(response);
+    renderResponse(response, query);
   } catch (err) {
     console.error("search failed", err);
     renderError(`search failed: ${err}`);

@@ -64,6 +64,7 @@ struct SearchResult {
 struct Citation {
     path: String,
     snippet: String,
+    line: usize,
 }
 
 #[derive(Serialize)]
@@ -100,7 +101,7 @@ async fn search(
         synthesize::synthesize(&state.embedder, &query, &hits)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(|c| Citation { path: c.path, snippet: c.snippet })
+            .map(|c| Citation { path: c.path, snippet: c.snippet, line: c.line })
             .collect()
     } else {
         Vec::new()
@@ -113,6 +114,17 @@ async fn search(
         .collect();
 
     Ok(SearchResponse { results, citations })
+}
+
+/// Finds the most relevant line in `path` for `query`, so a plain search
+/// result (which — unlike a citation — doesn't already have a known
+/// snippet) can still be opened at the right spot instead of line 1.
+/// Re-reads the file from disk rather than the indexed copy, so it reflects
+/// the file's current contents even if it's changed since last indexed.
+#[tauri::command]
+async fn find_line(state: State<'_, AppState>, path: String, query: String) -> Result<usize, String> {
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    synthesize::best_matching_line(&state.embedder, &query, &content).map_err(|e| e.to_string())
 }
 
 // A hard cap, not a soft warning: past this many files, something has
@@ -334,6 +346,7 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             search,
+            find_line,
             start_watch,
             stop_watch,
             list_watched,

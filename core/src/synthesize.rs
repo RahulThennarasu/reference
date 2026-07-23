@@ -18,6 +18,17 @@ const PROSE_EXTENSIONS: &[&str] = &["md", "txt", "rst", "org", "adoc"];
 pub struct Citation {
     pub path: String,
     pub snippet: String,
+    pub line: usize,
+}
+
+/// 1-indexed line number where `needle` first appears in `content`. Falls
+/// back to line 1 (rather than failing) if it can't be found — worst case
+/// the editor just opens at the top of the file instead of not opening.
+fn line_of(content: &str, needle: &str) -> usize {
+    match content.find(needle) {
+        Some(byte_pos) => content[..byte_pos].matches('\n').count() + 1,
+        None => 1,
+    }
 }
 
 
@@ -120,11 +131,45 @@ pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Resul
             }
         }
 
-        citations.push(Citation {
-            path: hit.path.clone(),
-            snippet: owned[best_idx].clone(),
-        });
+        let snippet = owned[best_idx].clone();
+        let line = line_of(&hit.content, &snippet);
+        citations.push(Citation { path: hit.path.clone(), snippet, line });
     }
 
     Ok(citations)
+}
+
+/// Finds the 1-indexed line in `content` whose text is closest to `query`,
+/// for jumping straight to the relevant part of a file when opening it from
+/// a plain search result (as opposed to a citation, which already has an
+/// exact snippet to locate). Works line-by-line rather than sentence-by-
+/// sentence, since that's what an editor actually jumps to and it holds up
+/// for source code too, not just prose.
+pub fn best_matching_line(embedder: &Embedder, query: &str, content: &str) -> Result<usize> {
+    let query_embedding = embedder.embed(query)?;
+
+    let lines: Vec<(usize, &str)> = content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| (i + 1, line.trim()))
+        .filter(|(_, line)| line.len() > 3)
+        .collect();
+    if lines.is_empty() {
+        return Ok(1);
+    }
+
+    let owned: Vec<String> = lines.iter().map(|(_, l)| l.to_string()).collect();
+    let embeddings = embedder.embed_batch(&owned)?;
+
+    let mut best_idx = 0;
+    let mut best_score = f32::MIN;
+    for (i, e) in embeddings.iter().enumerate() {
+        let score = dot(&query_embedding, e);
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+
+    Ok(lines[best_idx].0)
 }
