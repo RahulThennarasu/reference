@@ -278,6 +278,25 @@ let folderSuggestions: string[] = [];
 let folderSelectedIndex = 0;
 let watchedFolders: string[] = [];
 
+// The currently rendered citation/result rows, in on-screen order, and
+// which one is keyboard-highlighted. A launcher like this is used
+// keyboard-first — arrow keys move the highlight, Enter activates whatever
+// row it's on, same as the folder-suggestion list already does.
+let resultRows: HTMLElement[] = [];
+let resultSelectedIndex = -1;
+
+function resetResultRows() {
+  resultRows = [];
+  resultSelectedIndex = -1;
+}
+
+function updateResultSelection() {
+  resultRows.forEach((row, i) => {
+    row.classList.toggle("selected", i === resultSelectedIndex);
+  });
+  resultRows[resultSelectedIndex]?.scrollIntoView({ block: "nearest" });
+}
+
 function basename(path: string): string {
   return path.replace(/\/$/, "").split("/").pop() ?? path;
 }
@@ -318,6 +337,7 @@ function renderError(message: string) {
   resultsEl.innerHTML = "";
   lastResponse = null;
   updateCopyAllVisibility();
+  resetResultRows();
   const li = document.createElement("li");
   li.className = "result result-error";
   li.textContent = message;
@@ -383,9 +403,18 @@ function renderResponse(response: SearchResponse, query: string) {
   currentQuery = query;
   lastResponse = response;
   updateCopyAllVisibility();
+  resetResultRows();
 
   for (const citation of response.citations) {
-    resultsEl.appendChild(renderCitation(citation, query));
+    const li = renderCitation(citation, query);
+    const idx = resultRows.push(li) - 1;
+    // Hovering a row moves the keyboard highlight onto it too, so "the row
+    // under the mouse" and "the row Enter/Cmd+C act on" never disagree.
+    li.addEventListener("mouseenter", () => {
+      resultSelectedIndex = idx;
+      updateResultSelection();
+    });
+    resultsEl.appendChild(li);
   }
 
   for (const r of response.results) {
@@ -393,6 +422,11 @@ function renderResponse(response: SearchResponse, query: string) {
     li.className = "result clickable";
     li.title = `open ${basename(r.path)}`;
     li.addEventListener("click", () => openResultInEditor(r, query));
+    const idx = resultRows.push(li) - 1;
+    li.addEventListener("mouseenter", () => {
+      resultSelectedIndex = idx;
+      updateResultSelection();
+    });
 
     const name = document.createElement("span");
     name.className = "result-name";
@@ -430,6 +464,8 @@ function renderResponse(response: SearchResponse, query: string) {
     resultsEl.appendChild(li);
   }
 
+  resultSelectedIndex = resultRows.length > 0 ? 0 : -1;
+  updateResultSelection();
   resize();
 }
 
@@ -449,6 +485,7 @@ function renderFolderMode() {
   list.innerHTML = "";
   lastResponse = null;
   updateCopyAllVisibility();
+  resetResultRows();
 
   if (watchedFolders.length > 0) {
     const label = document.createElement("li");
@@ -576,6 +613,7 @@ function exitFolderMode() {
   if (resultsEl) resultsEl.innerHTML = "";
   lastResponse = null;
   updateCopyAllVisibility();
+  resetResultRows();
   resize();
 }
 
@@ -621,6 +659,7 @@ function search() {
     if (resultsEl) resultsEl.innerHTML = "";
     lastResponse = null;
     updateCopyAllVisibility();
+    resetResultRows();
     resize();
     return;
   }
@@ -685,29 +724,67 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    if (!folderMode) return;
-
-    if (e.key === "Tab") {
-      e.preventDefault();
-      if (folderSuggestions.length > 0 && searchInputEl) {
-        searchInputEl.value = folderSuggestions[folderSelectedIndex];
-        updateFolderSuggestions();
+    if (folderMode) {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        if (folderSuggestions.length > 0 && searchInputEl) {
+          searchInputEl.value = folderSuggestions[folderSelectedIndex];
+          updateFolderSuggestions();
+        }
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (folderSuggestions.length > 0) {
+          folderSelectedIndex = Math.min(folderSelectedIndex + 1, folderSuggestions.length - 1);
+          renderFolderMode();
+        }
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (folderSuggestions.length > 0) {
+          folderSelectedIndex = Math.max(folderSelectedIndex - 1, 0);
+          renderFolderMode();
+        }
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        commitFolder();
       }
-    } else if (e.key === "ArrowDown") {
+      return;
+    }
+
+    // Plain search mode: arrow keys move a highlighted row through the
+    // current citations/results, Enter activates whatever's highlighted —
+    // clicking is still there, but a launcher like this lives or dies on
+    // being usable without touching the mouse.
+    if (e.key === "ArrowDown") {
       e.preventDefault();
-      if (folderSuggestions.length > 0) {
-        folderSelectedIndex = Math.min(folderSelectedIndex + 1, folderSuggestions.length - 1);
-        renderFolderMode();
+      if (resultRows.length > 0) {
+        resultSelectedIndex = Math.min(resultSelectedIndex + 1, resultRows.length - 1);
+        updateResultSelection();
       }
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      if (folderSuggestions.length > 0) {
-        folderSelectedIndex = Math.max(folderSelectedIndex - 1, 0);
-        renderFolderMode();
+      if (resultRows.length > 0) {
+        resultSelectedIndex = Math.max(resultSelectedIndex - 1, 0);
+        updateResultSelection();
       }
     } else if (e.key === "Enter") {
       e.preventDefault();
-      commitFolder();
+      resultRows[resultSelectedIndex]?.click();
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+      // If there's an actual text selection in the search input, that's the
+      // user copying their typed query — let the browser's native copy
+      // handle it untouched. Otherwise (the common case: just browsing
+      // results, cursor blinking, nothing selected) Cmd+C copies whatever
+      // row is currently highlighted, same as clicking its send button —
+      // no manual click needed to grab a chunk you're already hovering.
+      const hasTextSelection =
+        !!searchInputEl && searchInputEl.selectionStart !== searchInputEl.selectionEnd;
+      if (hasTextSelection) return;
+
+      const btn = resultRows[resultSelectedIndex]?.querySelector<HTMLButtonElement>(".send-btn");
+      if (btn) {
+        e.preventDefault();
+        btn.click();
+      }
     }
   });
 

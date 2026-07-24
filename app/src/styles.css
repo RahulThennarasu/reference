@@ -89,6 +89,13 @@ body {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Keyboard-highlighted row (arrow keys move this, Enter activates it) — a
+   touch stronger than plain :hover so it stays legible as "this is the one
+   Enter will open" even when the mouse is sitting somewhere else. */
+.result.selected {
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .row-icon {
   width: 16px;
   height: 16px;
@@ -129,6 +136,10 @@ body {
 
 .answer.clickable:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+
+.answer.selected {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .answer-summary {
