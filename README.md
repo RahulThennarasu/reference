@@ -35,6 +35,7 @@ this app is the real version: an actual local index of your files, kept current 
 | vector storage  | lancedb (rust crate)      | embedded (in-process, no server), native rust bindings, hybrid vector + metadata filtering, versioned storage                                         |
 | upsert behavior | `table::merge_insert`     | confirmed available in the current lancedb rust crate (v0.31.0), handles "file changed, re-embed it" as a delete-then-upsert keyed on path + start line, since one file is now many chunk rows |
 | code chunking    | `tree-sitter`             | parses rust/python/typescript/javascript into function/class-level chunks instead of embedding a whole file as one vector, see `docs/code-aware-chunking.md` |
+| agent access    | `rmcp` (official Rust MCP SDK) | replaces the removed `reference-cli`; a long-running MCP server keeps the embedding model warm across calls instead of reloading it per invocation, see `docs/mcp-agent-usage.md` |
 
 ## core features (v1 scope)
 

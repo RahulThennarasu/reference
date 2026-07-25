@@ -27,6 +27,7 @@ the name reflects the core mechanism: the index doesn't store or duplicate your 
 | upsert          | delete rows for `path`, then `table::merge_insert(&["path", "start_line"])` with `when_matched_update_all` + `when_not_matched_insert_all` | one file -> N chunk rows now, see `docs/code-aware-chunking.md` |
 | index type      | `index::auto`                                                                                   | lancedb auto-selects ivf-pq for vector columns, btree otherwise, no manual index tuning needed for v1 |
 | release profile | `[profile.release]` with `strip = true`, `lto = true`, `codegen-units = 1`                      | default release profile produced a ~220mb macOS bundle (candle + arrow/datafusion/lance + 4 tree-sitter grammars statically linked); this cut it to ~102mb. lto forces a slow full rebuild (~15min), dev profile is untouched |
+| agent-facing interface | MCP server (`mcp/`, crate `rmcp` 2.2.0) over stdio, replacing `reference-cli` | verified `rmcp` 2.2.0 (not the `3.0.0-beta.2` cargo surfaces by default) as current stable via docs.rs + github tags, per this file's own rule below on verifying crate claims; one read-only `search` tool, no folder-management tool by design |
 
 ## known gaps / things to verify before relying on them
 
@@ -44,7 +45,7 @@ this repo is itself indexed by `reference`, chunked at function/class granularit
 
 use it first, before grep, whenever a question names no literal string/identifier to search for and instead describes *behavior* or *intent*: "why don't impl methods get their own chunk", "what stops a wip file with a syntax error from disappearing from the index", "how does a citation's line number stay correct when the chunk isn't the whole file". grep is still the right tool once you already know the identifier/string you're looking for (a constant name, an error message, a literal number), this is for the case where you'd otherwise have to guess identifier names to even start grepping.
 
-`reference-cli` (the old shell-out-and-parse-json interface) has been removed. its replacement is an MCP server (`mcp/`), exposing a read-only `search` tool over the same index — call it as `mcp__reference-mcp__search` (no folder-management tool by design, see the opt-in principle above). prefer this tool directly over grep or shelling out, per the same rule above: use it whenever the question describes behavior/intent rather than naming a literal string to search for.
+`reference-cli` (the old shell-out-and-parse-json interface) has been removed. its replacement is an MCP server (`mcp/`), exposing a read-only `search` tool over the same index — call it as `mcp__reference-mcp__search` (no folder-management tool by design, see the opt-in principle above). prefer this tool directly over grep or shelling out, per the same rule above: use it whenever the question describes behavior/intent rather than naming a literal string to search for. full agent usage reference (setup, tool schema, caveats): `docs/mcp-agent-usage.md`.
 
 tool selection is a model decision, not something CLAUDE.md can force — if grep gets reached for anyway on a behavior/intent question, that's expected, not a bug to fix here. `/refsearch <query>` (`.claude/commands/refsearch.md`) is the explicit, reliable way to invoke the tool directly instead of relying on this instruction being followed.
 
