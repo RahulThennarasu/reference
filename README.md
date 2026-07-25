@@ -43,7 +43,8 @@ this app is the real version: an actual local index of your files, kept current 
 - local gpu-accelerated embeddings (cuda / metal)
 - hybrid search: fast fuzzy filename match + semantic match
 - code-aware chunking: search and cite exact functions/classes, not just whole files
-- answer synthesis with source citations, linking back to the actual file
+- answer synthesis with source citations, linking back to the actual file, code citations are syntax-highlighted with a high-contrast palette tuned for the app's dark theme
+- a "send to agent" button on every result and citation: copies a formatted query + code/line-range context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent (claude code, codex, etc.) they're using
 - a cli (`reference-cli`) sharing the same index as the app, built for coding agents to query directly, see `docs/cli-agent-usage.md`
 
 ## explicitly out of scope for v1
@@ -55,12 +56,14 @@ this app is the real version: an actual local index of your files, kept current 
 
 ## later / stretch ideas
 
-- a "send to agent" button in the search ui: copy a formatted query + citation context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent they're using
 - multi-machine indexing (search across a mac and a pc you own)
 - structured fact extraction (claims with provenance, not just chunk retrieval)
 - plugin/extension model for new source types (notion, browser history, calendar)
 - natural-language file actions (rename, move), bigger scope jump into agent territory, not v1
+- directly launching a coding agent with context (not just clipboard hand-off), scoped to claude code specifically since there's no universal way to inject a prompt into an arbitrary running agent session
 
 ## current status
 
-watch, embed, store, and hybrid search all work end-to-end, through both the tauri app and the cli, sharing one index. code is chunked at function/class granularity for rust, python, typescript, and javascript (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app. the cli additionally supports `--json` output for coding agents to consume directly, see `docs/cli-agent-usage.md`. no packaged installer yet, building from source is the only way to run it today.
+watch, embed, store, and hybrid search all work end-to-end, through both the tauri app and the cli, sharing one index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, and javascript (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result. the cli additionally supports `--json` output for coding agents to consume directly, see `docs/cli-agent-usage.md`.
+
+no packaged installer/distribution yet (no code signing, no notarization, no release workflow), building from source (`pnpm tauri build`) is the only way to run it today. a release build currently produces a ~102mb `.app` (~41mb `.dmg`), down from an initial ~220mb before tuning `[profile.release]` (`strip`, `lto`, `codegen-units = 1`), most of the remaining size is from statically linking candle, lancedb (arrow + datafusion + lance), and four tree-sitter grammars into one binary.

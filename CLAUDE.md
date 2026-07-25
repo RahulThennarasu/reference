@@ -26,6 +26,7 @@ the name reflects the core mechanism: the index doesn't store or duplicate your 
 | vector db       | lancedb (rust crate, embedded)                                                                  | local filesystem storage, no server process                                                           |
 | upsert          | delete rows for `path`, then `table::merge_insert(&["path", "start_line"])` with `when_matched_update_all` + `when_not_matched_insert_all` | one file -> N chunk rows now, see `docs/code-aware-chunking.md` |
 | index type      | `index::auto`                                                                                   | lancedb auto-selects ivf-pq for vector columns, btree otherwise, no manual index tuning needed for v1 |
+| release profile | `[profile.release]` with `strip = true`, `lto = true`, `codegen-units = 1`                      | default release profile produced a ~220mb macOS bundle (candle + arrow/datafusion/lance + 4 tree-sitter grammars statically linked); this cut it to ~102mb. lto forces a slow full rebuild (~15min), dev profile is untouched |
 
 ## known gaps / things to verify before relying on them
 
