@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "app/src-tauri"]
+members = ["core", "app/src-tauri"]
 
 # Dependencies (candle's tensor math especially) are compiled unoptimized in
 # a plain dev build, which makes CPU-bound embedding painfully slow. This
-# optimizes every dependency while leaving our own crates (core/cli/app) at
+# optimizes every dependency while leaving our own crates (core/app) at
 # normal dev opt-level, so incremental rebuilds of our own code stay fast —
 # heavy deps get compiled once with optimizations and then cached.
 [profile.dev.package."*"]

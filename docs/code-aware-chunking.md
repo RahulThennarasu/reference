@@ -126,7 +126,7 @@ results need a way to show chunk identity, not just file identity, e.g. `validat
 
 don't build all five languages at once. vertical-slice this the same way the rest of the project was built (per `CLAUDE.md`'s stated philosophy):
 
-1. **rust only**, end-to-end: schema migration, watcher changes, delete-then-reinsert, search, ui, proven completely on this project's own codebase (`core/`, `cli/`, `app/src-tauri/`) before adding a second language. this project indexing itself is the natural first test case.
+1. **rust only**, end-to-end: schema migration, watcher changes, delete-then-reinsert, search, ui, proven completely on this project's own codebase (`core/`, `app/src-tauri/`) before adding a second language. this project indexing itself is the natural first test case.
 2. add python and typescript/javascript next (covers `Orbis`'s stack, which has been the other real-world test corpus this whole session).
 3. go, or others, only if there's an actual need.
 

@@ -44,11 +44,7 @@ this repo is itself indexed by `reference`, chunked at function/class granularit
 
 use it first, before grep, whenever a question names no literal string/identifier to search for and instead describes *behavior* or *intent*: "why don't impl methods get their own chunk", "what stops a wip file with a syntax error from disappearing from the index", "how does a citation's line number stay correct when the chunk isn't the whole file". grep is still the right tool once you already know the identifier/string you're looking for (a constant name, an error message, a literal number), this is for the case where you'd otherwise have to guess identifier names to even start grepping.
 
-full agent usage reference (json output shape, examples, caveats): `docs/cli-agent-usage.md`. quick version:
-
-```
-reference-cli search "<query>" --json
-```
+agent-facing access is mid-migration: `reference-cli` (a shell-out-and-parse-json interface) has been removed. its replacement is an MCP server exposing a read-only `search` tool (reusing `reference-core`'s search/synthesize logic, same index, no folder-management tool by design, see the opt-in principle above) — not built yet. until it exists, fall back to grep for this repo.
 
 ## explicit non-goals (don't build these without discussing first)
 
