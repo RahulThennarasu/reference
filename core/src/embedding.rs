@@ -3,7 +3,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use hf_hub::{api::tokio::Api, Repo, RepoType};
-use tokenizers::{PaddingParams, Tokenizer};
+use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 
 const MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const REVISION: &str = "main";
@@ -36,6 +36,15 @@ impl Embedder {
         let mut tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load tokenizer: {e}"))?;
         tokenizer.with_padding(Some(PaddingParams::default()));
+        // Without this, a chunk longer than the model's position-embedding limit
+        // (whole-file fallback, or an unusually large function) fails deep inside
+        // the BERT forward pass instead of being truncated up front.
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: config.max_position_embeddings,
+                ..Default::default()
+            }))
+            .map_err(|e| anyhow::anyhow!("failed to set tokenizer truncation: {e}"))?;
 
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path], DTYPE, &device)?

@@ -14,6 +14,7 @@ use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{connect, Connection, Table};
 
 use crate::embedding::EMBEDDING_DIM;
+use crate::synthesize::is_question;
 
 const TABLE_NAME: &str = "files";
 
@@ -175,6 +176,18 @@ impl Store {
         let matcher = SkimMatcherV2::default();
         let mut hits = Vec::new();
 
+        // Fuzzy filename matching assumes a short, filename-shaped query
+        // ("store.rs", "auth"). Run it against a full natural-language
+        // question instead and it degenerates into a coincidental
+        // character-subsequence match against whatever filename happens to
+        // be long enough to contain the query's letters in order, which can
+        // outrank the file that's actually semantically relevant. Question-
+        // shaped queries (per the same heuristic `synthesize` uses to decide
+        // whether to answer at all) skip the fuzzy component entirely and
+        // rank on semantic similarity alone.
+        let fuzzy_weight = if is_question(query_text) { 0.0 } else { FUZZY_WEIGHT };
+        let semantic_weight = if is_question(query_text) { 1.0 } else { SEMANTIC_WEIGHT };
+
         for batch in &batches {
             let paths = batch
                 .column_by_name("path")
@@ -209,14 +222,18 @@ impl Store {
 
                 let semantic_sim = dot(query_embedding, row_embedding).max(0.0);
 
-                let filename = Path::new(&path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&path);
-                let fuzzy_raw = matcher.fuzzy_match(filename, query_text).unwrap_or(0) as f32;
-                let fuzzy_sim = fuzzy_raw / (fuzzy_raw + FUZZY_SATURATION);
+                let fuzzy_sim = if fuzzy_weight == 0.0 {
+                    0.0
+                } else {
+                    let filename = Path::new(&path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&path);
+                    let fuzzy_raw = matcher.fuzzy_match(filename, query_text).unwrap_or(0) as f32;
+                    fuzzy_raw / (fuzzy_raw + FUZZY_SATURATION)
+                };
 
-                let score = SEMANTIC_WEIGHT * semantic_sim + FUZZY_WEIGHT * fuzzy_sim;
+                let score = semantic_weight * semantic_sim + fuzzy_weight * fuzzy_sim;
                 hits.push(HybridHit {
                     path,
                     content,
