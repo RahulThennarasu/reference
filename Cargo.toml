@@ -9,3 +9,17 @@ members = ["core", "cli", "app/src-tauri"]
 # heavy deps get compiled once with optimizations and then cached.
 [profile.dev.package."*"]
 opt-level = 2
+
+# No [profile.release] section existed before this, so release builds were
+# using cargo's bare defaults: full debug symbols kept, no LTO, 16 codegen
+# units. That's fine for a small binary, but this workspace statically links
+# arrow + datafusion + lance + candle + four tree-sitter grammars, so the
+# default profile produced a 220mb macOS app bundle with ~456k symbols.
+# strip removes debug info the shipped app doesn't need, lto lets the linker
+# eliminate dead code across crate boundaries (a lot of datafusion/lance is
+# unused by this app's actual code paths), codegen-units = 1 trades slower
+# release builds for better whole-program optimization.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
