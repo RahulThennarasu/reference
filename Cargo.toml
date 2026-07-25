@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "app/src-tauri"]
+members = ["core", "mcp", "app/src-tauri"]
 
 # Dependencies (candle's tensor math especially) are compiled unoptimized in
 # a plain dev build, which makes CPU-bound embedding painfully slow. This

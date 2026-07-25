@@ -44,7 +44,9 @@ this repo is itself indexed by `reference`, chunked at function/class granularit
 
 use it first, before grep, whenever a question names no literal string/identifier to search for and instead describes *behavior* or *intent*: "why don't impl methods get their own chunk", "what stops a wip file with a syntax error from disappearing from the index", "how does a citation's line number stay correct when the chunk isn't the whole file". grep is still the right tool once you already know the identifier/string you're looking for (a constant name, an error message, a literal number), this is for the case where you'd otherwise have to guess identifier names to even start grepping.
 
-agent-facing access is mid-migration: `reference-cli` (a shell-out-and-parse-json interface) has been removed. its replacement is an MCP server exposing a read-only `search` tool (reusing `reference-core`'s search/synthesize logic, same index, no folder-management tool by design, see the opt-in principle above) — not built yet. until it exists, fall back to grep for this repo.
+`reference-cli` (the old shell-out-and-parse-json interface) has been removed. its replacement is an MCP server (`mcp/`), exposing a read-only `search` tool over the same index — call it as `mcp__reference-mcp__search` (no folder-management tool by design, see the opt-in principle above). prefer this tool directly over grep or shelling out, per the same rule above: use it whenever the question describes behavior/intent rather than naming a literal string to search for.
+
+tool selection is a model decision, not something CLAUDE.md can force — if grep gets reached for anyway on a behavior/intent question, that's expected, not a bug to fix here. `/refsearch <query>` (`.claude/commands/refsearch.md`) is the explicit, reliable way to invoke the tool directly instead of relying on this instruction being followed.
 
 ## explicit non-goals (don't build these without discussing first)
 

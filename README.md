@@ -45,7 +45,7 @@ this app is the real version: an actual local index of your files, kept current 
 - code-aware chunking: search and cite exact functions/classes, not just whole files
 - answer synthesis with source citations, linking back to the actual file, code citations are syntax-highlighted with a high-contrast palette tuned for the app's dark theme
 - a "send to agent" button on every result and citation: copies a formatted query + code/line-range context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent (claude code, codex, etc.) they're using
-- an MCP server (planned, not built yet) exposing a read-only `search` tool over the same index, for agents to query directly mid-task instead of shelling out to a CLI
+- an MCP server (`mcp/`) exposing a read-only `search` tool over the same index, for agents to query directly mid-task instead of shelling out to a CLI. `cargo build -p reference-mcp` once, then `.mcp.json` (checked into this repo) picks it up automatically — Claude Code still prompts for one-time approval per person, per its project-scoped server rules
 
 ## explicitly out of scope for v1
 
@@ -64,6 +64,6 @@ this app is the real version: an actual local index of your files, kept current 
 
 ## current status
 
-watch, embed, store, and hybrid search all work end-to-end through the tauri app, backed by one index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, and javascript (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result. the `reference-cli` binary (a shell-out-and-parse-json interface for coding agents) has been removed in favor of an MCP server exposing the same search over the same index, not built yet — until it exists, agents working in this repo fall back to grep.
+watch, embed, store, and hybrid search all work end-to-end through the tauri app, backed by one index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, and javascript (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result. the `reference-cli` binary (a shell-out-and-parse-json interface for coding agents) has been removed in favor of an MCP server (`mcp/`, package `reference-mcp`) exposing the same search over the same index, keeping the embedding model warm across calls instead of reloading it per invocation like the old CLI did.
 
 no packaged installer/distribution yet (no code signing, no notarization, no release workflow), building from source (`pnpm tauri build`) is the only way to run it today. a release build currently produces a ~102mb `.app` (~41mb `.dmg`), down from an initial ~220mb before tuning `[profile.release]` (`strip`, `lto`, `codegen-units = 1`), most of the remaining size is from statically linking candle, lancedb (arrow + datafusion + lance), and four tree-sitter grammars into one binary.
