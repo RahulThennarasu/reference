@@ -310,18 +310,29 @@ fn content_match_terms(query_text: &str) -> Vec<String> {
     terms
 }
 
-/// Fraction of `query_terms` that appear literally (case-insensitive) in
-/// `content` — a lightweight complement to embedding similarity, which can
-/// rank a chunk that merely discusses a similar topic above one that
+/// Fraction of `query_terms` that appear as whole words (case-insensitive)
+/// in `content` — a lightweight complement to embedding similarity, which
+/// can rank a chunk that merely discusses a similar topic above one that
 /// verbatim contains the words actually searched for.
+///
+/// Word-boundary-aware, not a raw substring check: a naive `content.
+/// contains("build")` matches inside "rebuild", "builds", "building" too,
+/// which turned this into noise rather than signal for any query
+/// containing a short, common word — a query for "how does X build Y"
+/// coincidentally boosted files whose only connection was talking about
+/// `cargo build`/"rebuild" in an unrelated comment.
 fn content_match_score(query_terms: &[String], content: &str) -> f32 {
     if query_terms.is_empty() {
         return 0.0;
     }
     let content_lower = content.to_lowercase();
+    let content_words: std::collections::HashSet<&str> = content_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
     let matched = query_terms
         .iter()
-        .filter(|t| content_lower.contains(t.as_str()))
+        .filter(|t| content_words.contains(t.as_str()))
         .count();
     matched as f32 / query_terms.len() as f32
 }
