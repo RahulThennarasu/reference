@@ -3,10 +3,74 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use hf_hub::{api::tokio::Api, Repo, RepoType};
+use serde::{Deserialize, Serialize};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 
-const MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const REVISION: &str = "main";
+
+/// User-selectable embedding models — gap #5 in docs/feature-gaps.md,
+/// scoped down to just this axis of "zero configurability" (not gpu
+/// backend or ranking weights, see that doc for why). Deliberately
+/// restricted to models that are both (a) 384-dim, matching this project's
+/// `EMBEDDING_DIM` — a different dimension would mean changing the LanceDB
+/// schema's `FixedSizeList` width, not just reindexing, a much bigger
+/// change — and (b) BERT-architecture, since `candle_transformers` 0.11.0's
+/// `bert` module (confirmed via its `Config`, which derives `Deserialize`
+/// straight from each model's own `config.json`) only covers that family;
+/// a popular non-BERT model like `all-mpnet-base-v2` (MPNet) isn't loadable
+/// through this code path at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EmbeddingModel {
+    #[default]
+    MiniLmL6,
+    MiniLmL12,
+    BgeSmall,
+    GteSmall,
+}
+
+impl EmbeddingModel {
+    pub fn repo_id(&self) -> &'static str {
+        match self {
+            EmbeddingModel::MiniLmL6 => "sentence-transformers/all-MiniLM-L6-v2",
+            EmbeddingModel::MiniLmL12 => "sentence-transformers/all-MiniLM-L12-v2",
+            EmbeddingModel::BgeSmall => "BAAI/bge-small-en-v1.5",
+            EmbeddingModel::GteSmall => "thenlper/gte-small",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            EmbeddingModel::MiniLmL6 => "MiniLM-L6 (fast, default)",
+            EmbeddingModel::MiniLmL12 => "MiniLM-L12 (slower, more accurate)",
+            EmbeddingModel::BgeSmall => "BGE-small (retrieval-tuned)",
+            EmbeddingModel::GteSmall => "GTE-small (retrieval-tuned)",
+        }
+    }
+}
+
+/// Reads just the `embedding_model` field out of the app's settings file
+/// (see `app/src-tauri/src/lib.rs`'s `AppSettings`), ignoring every other
+/// field (`ranking_weights` etc.) rather than needing to know that whole
+/// shape here. This exists for the MCP server: it opens the exact same
+/// on-disk index the app writes to, so if the app has switched embedding
+/// models, MCP's query embeddings have to come from that same model too —
+/// cosine similarity between vectors from two different models is
+/// meaningless, so silently defaulting here would just make MCP search
+/// return garbage-ranked results the moment the app's choice diverges from
+/// the default. Falls back to the default on any read/parse failure (no
+/// settings file yet, fresh install) same as the app does.
+pub fn load_configured_model(settings_path: &std::path::Path) -> EmbeddingModel {
+    #[derive(Deserialize, Default)]
+    struct Partial {
+        #[serde(default)]
+        embedding_model: EmbeddingModel,
+    }
+    std::fs::read_to_string(settings_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Partial>(&s).ok())
+        .unwrap_or_default()
+        .embedding_model
+}
 
 pub const EMBEDDING_DIM: usize = 384;
 
@@ -17,12 +81,12 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    pub async fn load() -> Result<Self> {
+    pub async fn load(model: EmbeddingModel) -> Result<Self> {
         let device = crate::device::select()?;
 
         let api = Api::new().context("failed to create hf-hub api client")?;
         let repo = api.repo(Repo::with_revision(
-            MODEL_ID.to_string(),
+            model.repo_id().to_string(),
             RepoType::Model,
             REVISION.to_string(),
         ));

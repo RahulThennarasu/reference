@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use reference_core::embedding::Embedder;
+use reference_core::embedding::{Embedder, EmbeddingModel};
 use reference_core::paths;
 use reference_core::store::{RankingWeights, Store};
 use reference_core::synthesize;
 use reference_core::watcher;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 /// The stop flag alone isn't enough to safely purge a folder's indexed rows:
@@ -24,7 +24,17 @@ struct WatchHandle {
 }
 
 struct AppState {
-    embedder: Arc<Embedder>,
+    // `Mutex<Arc<_>>`, not a plain `Arc<Embedder>`: `set_embedding_model`
+    // needs to swap in a whole new `Embedder` at runtime (a different
+    // model's weights/tokenizer, not something you can mutate in place).
+    // Callers lock just long enough to clone the `Arc` out, then drop the
+    // lock before doing any actual embedding work, so a model switch never
+    // blocks a search beyond that clone.
+    embedder: Mutex<Arc<Embedder>>,
+    // Tracks which model is currently active, for `get_embedding_model` —
+    // `Embedder` itself doesn't know/expose which `EmbeddingModel` variant
+    // it was loaded from.
+    current_model: Mutex<EmbeddingModel>,
     store: Arc<Store>,
     // Each entry gets its own background watch thread; re-adding an
     // already-watched folder is a no-op instead of spawning a duplicate.
@@ -59,16 +69,43 @@ fn save_watched_folders(state: &AppState) {
     }
 }
 
-fn load_ranking_weights() -> RankingWeights {
+// One file backs both settings — `#[serde(default)]` on each field means
+// a file written before one of them existed (e.g. ranking_weights.json's
+// predecessor before embedding_model was added) still parses fine, just
+// with that field's default rather than failing the whole read the way an
+// all-or-nothing struct would.
+#[derive(Serialize, Deserialize, Default)]
+struct AppSettings {
+    #[serde(default)]
+    ranking_weights: RankingWeights,
+    #[serde(default)]
+    embedding_model: EmbeddingModel,
+}
+
+fn load_app_settings() -> AppSettings {
     std::fs::read_to_string(paths::default_settings_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-fn save_ranking_weights(weights: &RankingWeights) -> Result<(), String> {
-    let json = serde_json::to_string(weights).map_err(|e| e.to_string())?;
+fn save_app_settings(settings: &AppSettings) -> Result<(), String> {
+    let json = serde_json::to_string(settings).map_err(|e| e.to_string())?;
     std::fs::write(paths::default_settings_path(), json).map_err(|e| e.to_string())
+}
+
+// Read-modify-write against the shared file, so setting one field never
+// clobbers whatever the other one currently holds.
+fn save_ranking_weights(weights: &RankingWeights) -> Result<(), String> {
+    let mut settings = load_app_settings();
+    settings.ranking_weights = *weights;
+    save_app_settings(&settings)
+}
+
+fn save_embedding_model(model: EmbeddingModel) -> Result<(), String> {
+    let mut settings = load_app_settings();
+    settings.embedding_model = model;
+    save_app_settings(&settings)
 }
 
 #[derive(Serialize)]
@@ -163,7 +200,8 @@ async fn search(
     };
 
     let weights = *state.ranking_weights.lock().map_err(|e| e.to_string())?;
-    let embedding = state.embedder.embed(&query).map_err(|e| e.to_string())?;
+    let embedder = state.embedder.lock().map_err(|e| e.to_string())?.clone();
+    let embedding = embedder.embed(&query).map_err(|e| e.to_string())?;
     let hits = state
         .store
         .hybrid_search(
@@ -177,7 +215,7 @@ async fn search(
         .map_err(|e| e.to_string())?;
 
     let citations = if synthesize::is_question(&query) && !hits.is_empty() {
-        synthesize::synthesize(&state.embedder, &query, &hits)
+        synthesize::synthesize(&embedder, &query, &hits)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|c| Citation {
@@ -237,7 +275,8 @@ async fn search(
 #[tauri::command]
 async fn find_line(state: State<'_, AppState>, path: String, query: String) -> Result<usize, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    synthesize::best_matching_line(&state.embedder, &query, &content).map_err(|e| e.to_string())
+    let embedder = state.embedder.lock().map_err(|e| e.to_string())?.clone();
+    synthesize::best_matching_line(&embedder, &query, &content).map_err(|e| e.to_string())
 }
 
 /// Slices out `start_line..=end_line` (1-indexed, inclusive) of `path`, for
@@ -335,7 +374,7 @@ fn start_watching_folder(state: &AppState, folder: String) -> Result<(), String>
         return Ok(());
     }
 
-    let embedder = state.embedder.clone();
+    let embedder = state.embedder.lock().map_err(|e| e.to_string())?.clone();
     let store = state.store.clone();
     let thread_stop = stop.clone();
     let thread_path = path.clone();
@@ -374,9 +413,12 @@ fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String>
 /// every already-indexed row under it. The wait matters: without it, an
 /// already-queued filesystem event the thread was mid-processing can call
 /// `upsert` *after* the purge runs, silently resurrecting a row for a
-/// folder that was just removed.
-#[tauri::command]
-async fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
+/// folder that was just removed. Plain function (not a command), same
+/// reasoning as `start_watching_folder`: `set_embedding_model` needs this
+/// same stop-then-restart sequence per folder to force a full reindex
+/// under the new model, without going through Tauri's `State` extractor
+/// twice in one command.
+async fn stop_watching_folder(state: &AppState, folder: String) -> Result<(), String> {
     let path = PathBuf::from(&folder);
     let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
 
@@ -397,7 +439,7 @@ async fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), St
         .map_err(|e| e.to_string())?;
     }
 
-    save_watched_folders(&state);
+    save_watched_folders(state);
 
     state
         .store
@@ -406,6 +448,11 @@ async fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), St
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+async fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
+    stop_watching_folder(&state, folder).await
 }
 
 #[tauri::command]
@@ -427,6 +474,69 @@ fn get_ranking_weights(state: State<'_, AppState>) -> Result<RankingWeights, Str
 fn set_ranking_weights(state: State<'_, AppState>, weights: RankingWeights) -> Result<(), String> {
     save_ranking_weights(&weights)?;
     *state.ranking_weights.lock().map_err(|e| e.to_string())? = weights;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct EmbeddingModelInfo {
+    id: EmbeddingModel,
+    display_name: &'static str,
+}
+
+/// Every model the app lets a user pick from — all 384-dim, all
+/// BERT-architecture (see `EmbeddingModel`'s doc comment in
+/// core/src/embedding.rs for why those two constraints exist).
+#[tauri::command]
+fn list_embedding_models() -> Vec<EmbeddingModelInfo> {
+    [
+        EmbeddingModel::MiniLmL6,
+        EmbeddingModel::MiniLmL12,
+        EmbeddingModel::BgeSmall,
+        EmbeddingModel::GteSmall,
+    ]
+    .into_iter()
+    .map(|id| EmbeddingModelInfo { id, display_name: id.display_name() })
+    .collect()
+}
+
+#[tauri::command]
+fn get_embedding_model(state: State<'_, AppState>) -> Result<EmbeddingModel, String> {
+    state.current_model.lock().map(|m| *m).map_err(|e| e.to_string())
+}
+
+/// Switches the active embedding model, persists the choice, and forces a
+/// full reindex of every currently-watched folder. Not optional the way
+/// `set_ranking_weights` is a no-reindex change: two different models'
+/// vectors aren't comparable even at the same 384 dimension (see gap #5,
+/// docs/feature-gaps.md), so leaving the old index in place would mean
+/// every search silently scores query embeddings from the new model
+/// against stored embeddings from the old one — wrong results, not just
+/// stale ones, and nothing about that would look like an error.
+///
+/// Reuses the same stop-then-start sequence a folder goes through when
+/// manually un/re-watched (`stop_watching_folder` purges that folder's
+/// rows, `start_watching_folder` does a full initial scan+embed) rather
+/// than a bespoke whole-table wipe — one folder failing to reindex doesn't
+/// corrupt the others, and it's a code path that's already exercised by
+/// normal watch/unwatch.
+#[tauri::command]
+async fn set_embedding_model(state: State<'_, AppState>, model: EmbeddingModel) -> Result<(), String> {
+    save_embedding_model(model)?;
+
+    let new_embedder = Embedder::load(model).await.map_err(|e| e.to_string())?;
+    *state.embedder.lock().map_err(|e| e.to_string())? = Arc::new(new_embedder);
+    *state.current_model.lock().map_err(|e| e.to_string())? = model;
+
+    let folders: Vec<String> = {
+        let watching = state.watching.lock().map_err(|e| e.to_string())?;
+        watching.keys().map(|p| p.to_string_lossy().to_string()).collect()
+    };
+
+    for folder in folders {
+        stop_watching_folder(&state, folder.clone()).await?;
+        start_watching_folder(&state, folder)?;
+    }
+
     Ok(())
 }
 
@@ -499,17 +609,20 @@ pub fn run() {
     std::fs::create_dir_all(paths::default_app_data_dir())
         .expect("failed to create app data directory");
 
-    println!("loading embedding model (all-MiniLM-L6-v2)...");
-    let embedder =
-        tauri::async_runtime::block_on(Embedder::load()).expect("failed to load embedding model");
+    let settings = load_app_settings();
+
+    println!("loading embedding model ({})...", settings.embedding_model.display_name());
+    let embedder = tauri::async_runtime::block_on(Embedder::load(settings.embedding_model))
+        .expect("failed to load embedding model");
     let store = tauri::async_runtime::block_on(Store::open(&paths::default_db_uri()))
         .expect("failed to open lancedb store");
 
     let state = AppState {
-        embedder: Arc::new(embedder),
+        embedder: Mutex::new(Arc::new(embedder)),
+        current_model: Mutex::new(settings.embedding_model),
         store: Arc::new(store),
         watching: Mutex::new(HashMap::new()),
-        ranking_weights: Mutex::new(load_ranking_weights()),
+        ranking_weights: Mutex::new(settings.ranking_weights),
     };
 
     for folder in load_watched_folders() {
@@ -532,7 +645,10 @@ pub fn run() {
             home_dir,
             list_dir_suggestions,
             get_ranking_weights,
-            set_ranking_weights
+            set_ranking_weights,
+            list_embedding_models,
+            get_embedding_model,
+            set_embedding_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

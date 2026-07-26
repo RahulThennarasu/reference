@@ -6,12 +6,12 @@
 // "truncated" badge instead of this being invisible). Not wired into
 // `cargo test` — run manually with
 // `cargo run -p reference-core --example check_truncation`.
-use reference_core::embedding::{Embedder, EMBEDDING_DIM};
+use reference_core::embedding::{Embedder, EmbeddingModel, EMBEDDING_DIM};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     println!("loading embedding model...");
-    let embedder = Embedder::load().await?;
+    let embedder = Embedder::load(EmbeddingModel::default()).await?;
 
     // ~2000 words, comfortably past the 512-token limit once tokenized.
     let oversized = "fn validate_jwt_token(token: &str) -> Result<Claims> { ".repeat(200);

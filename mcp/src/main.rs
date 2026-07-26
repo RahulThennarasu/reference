@@ -82,8 +82,14 @@ impl ReferenceServer {
         let db_uri = paths::default_db_uri();
         std::fs::create_dir_all(paths::default_app_data_dir())?;
 
-        tracing::info!("loading embedding model (all-MiniLM-L6-v2)...");
-        let embedder = Embedder::load().await?;
+        // Reads whatever model the app currently has configured, not just
+        // the default — this server opens the exact same on-disk index the
+        // app writes to, so query embeddings have to come from the same
+        // model as the stored vectors (see `load_configured_model`'s doc
+        // comment in core/src/embedding.rs).
+        let model = reference_core::embedding::load_configured_model(&paths::default_settings_path());
+        tracing::info!("loading embedding model ({})...", model.display_name());
+        let embedder = Embedder::load(model).await?;
         let store = Store::open(&db_uri).await?;
 
         Ok(Self {

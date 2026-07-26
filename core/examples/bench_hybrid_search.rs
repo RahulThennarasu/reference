@@ -6,7 +6,7 @@
 // -- <db_uri>`.
 use std::time::Instant;
 
-use reference_core::embedding::Embedder;
+use reference_core::embedding::{Embedder, EmbeddingModel};
 use reference_core::store::{RankingWeights, Store};
 
 #[tokio::main]
@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     let db_uri = std::env::args().nth(1).unwrap_or_else(|| "../app/data/reference-index".to_string());
 
     println!("loading embedding model...");
-    let embedder = Embedder::load().await?;
+    let embedder = Embedder::load(EmbeddingModel::default()).await?;
     let store = Store::open(&db_uri).await?;
 
     let row_count = store.row_count().await?;

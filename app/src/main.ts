@@ -122,7 +122,16 @@ interface RankingWeights {
   content: number;
 }
 
-const DEFAULT_RANKING_WEIGHTS: RankingWeights = { semantic: 0.55, fuzzy: 0.3, content: 0.15 };
+const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
+  semantic: 0.55,
+  fuzzy: 0.3,
+  content: 0.15,
+};
+
+interface EmbeddingModelInfo {
+  id: string;
+  display_name: string;
+}
 
 // VSCode registers this URI scheme itself; no shell-out or `code` CLI
 // dependency needed. Falls back to just opening the file if the line lookup
@@ -152,7 +161,8 @@ interface AgentContextItem {
 }
 
 function formatContextBlock(item: AgentContextItem): string {
-  const scoreSuffix = item.score !== undefined ? `, score ${item.score.toFixed(2)}` : "";
+  const scoreSuffix =
+    item.score !== undefined ? `, score ${item.score.toFixed(2)}` : "";
   const header = `${item.path}:${item.start_line}-${item.end_line} (${item.chunk_kind}${scoreSuffix})`;
   return `${header}\n${item.content}`;
 }
@@ -169,7 +179,11 @@ function formatAgentContext(query: string, items: AgentContextItem[]): string {
 // Copies the formatted context and flips the button into a "sent" state
 // briefly, so clicking it gives the same kind of feedback a copy button
 // anywhere else does, instead of silently doing something in the background.
-async function sendToAgent(button: HTMLButtonElement, query: string, item: AgentContextItem) {
+async function sendToAgent(
+  button: HTMLButtonElement,
+  query: string,
+  item: AgentContextItem,
+) {
   try {
     await writeText(formatAgentContext(query, [item]));
     button.classList.add("sent");
@@ -183,7 +197,9 @@ async function sendToAgent(button: HTMLButtonElement, query: string, item: Agent
   }
 }
 
-function sendButton(onClick: (button: HTMLButtonElement) => void): HTMLButtonElement {
+function sendButton(
+  onClick: (button: HTMLButtonElement) => void,
+): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.className = "send-btn";
   btn.title = "send to agent";
@@ -203,7 +219,9 @@ let lastResponse: SearchResponse | null = null;
 
 function updateCopyAllVisibility() {
   if (!copyAllBtnEl) return;
-  const hasContent = !!lastResponse && lastResponse.citations.length + lastResponse.results.length > 0;
+  const hasContent =
+    !!lastResponse &&
+    lastResponse.citations.length + lastResponse.results.length > 0;
   copyAllBtnEl.classList.toggle("visible", hasContent);
 }
 
@@ -242,11 +260,13 @@ async function copyAllVisible() {
         score: r.score,
         content,
       };
-    })
+    }),
   );
 
   try {
-    await writeText(formatAgentContext(currentQuery, [...citationItems, ...resultItems]));
+    await writeText(
+      formatAgentContext(currentQuery, [...citationItems, ...resultItems]),
+    );
     copyAllBtnEl.classList.add("sent");
     window.setTimeout(() => copyAllBtnEl?.classList.remove("sent"), 1200);
   } catch (err) {
@@ -277,8 +297,8 @@ const COLLAPSED_HEIGHT = 64;
 const MAX_VISIBLE_ROWS = 8;
 const MAX_WINDOW_HEIGHT = 560;
 const WINDOW_WIDTH = 680;
-const DEFAULT_PLACEHOLDER = "search your files — ⌘7 to add a folder";
-const FOLDER_PLACEHOLDER = "type a folder path — tab to complete, enter to watch";
+const DEFAULT_PLACEHOLDER = "search your files (⌘7 to add a folder)";
+const FOLDER_PLACEHOLDER = "type a folder path (tab to complete, enter to watch)";
 
 let searchInputEl: HTMLInputElement | null;
 let resultsEl: HTMLElement | null;
@@ -314,12 +334,47 @@ function updateScopeButton() {
     searchScope = "";
   }
 
-  scopeLabelEl.textContent = searchScope ? basename(searchScope) : "All folders";
+  scopeLabelEl.textContent = searchScope
+    ? basename(searchScope)
+    : "All folders";
   scopeBtnEl.classList.add("visible");
 }
 
-const CHECK_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+// Perimeter of a tall, narrow rectangle — just two columns (left/right), no
+// top/bottom-edge blocks needed since the corners already cover the full
+// width at this size. Taller than it is wide on purpose. [left, top] pixel
+// offsets for one 3px block, counter-clockwise from top-right (down the
+// right side, across the bottom, up the left). Positions are computed once
+// here rather than in CSS, since the per-block animation-delay staggering
+// already has to happen in JS anyway.
+const SPINNER_PERIMETER: Array<[number, number]> = [
+  [5, 0],
+  [5, 7],
+  [5, 14],
+  [5, 21],
+  [0, 21],
+  [0, 14],
+  [0, 7],
+  [0, 0],
+];
+const SPINNER_CYCLE_SECONDS = 0.6;
+
+// Marks the currently-selected folder in the scope picker — a small chase
+// animation (pixel blocks tracing a hollow rectangle's outline, one lit at
+// a time, the rest invisible) instead of a static checkmark, same accent
+// blue the checkmark used.
+function pixelSpinner(): HTMLElement {
+  const wrap = document.createElement("span");
+  wrap.className = "pixel-spinner";
+  SPINNER_PERIMETER.forEach(([left, top], i) => {
+    const block = document.createElement("i");
+    block.style.left = `${left}px`;
+    block.style.top = `${top}px`;
+    block.style.animationDelay = `${(i / SPINNER_PERIMETER.length) * SPINNER_CYCLE_SECONDS}s`;
+    wrap.appendChild(block);
+  });
+  return wrap;
+}
 
 // Renders the scope choices inline into #results, the same list the search
 // results/folder-suggestions already occupy — see the .scope-btn comment in
@@ -333,7 +388,11 @@ function renderScopeMenu() {
 
   const options: { value: string; label: string; path: string | null }[] = [
     { value: "", label: "All folders", path: null },
-    ...watchedFolders.map((folder) => ({ value: folder, label: basename(folder), path: folder })),
+    ...watchedFolders.map((folder) => ({
+      value: folder,
+      label: basename(folder),
+      path: folder,
+    })),
   ];
 
   for (const option of options) {
@@ -360,7 +419,7 @@ function renderScopeMenu() {
     if (option.value === searchScope) {
       const check = document.createElement("span");
       check.className = "scope-option-check";
-      check.innerHTML = CHECK_SVG;
+      check.appendChild(pixelSpinner());
       li.appendChild(check);
     }
 
@@ -421,6 +480,42 @@ function saveRankingWeights() {
   }, 200);
 }
 
+let embeddingModels: EmbeddingModelInfo[] = [];
+let currentEmbeddingModel = "";
+// True while `set_embedding_model` is in flight — that call only covers
+// swapping the active model and kicking off a fresh scan per watched
+// folder, not waiting for the scan itself to finish (same fire-and-forget
+// shape adding a folder already has, see `start_watching_folder` in
+// lib.rs), so this only guards against picking a second model mid-swap,
+// not against the background reindex still running after it resolves.
+let embeddingModelSwitching = false;
+
+async function loadEmbeddingModels() {
+  try {
+    embeddingModels = await invoke<EmbeddingModelInfo[]>(
+      "list_embedding_models",
+    );
+    currentEmbeddingModel = await invoke<string>("get_embedding_model");
+  } catch (err) {
+    console.error("failed to load embedding models", err);
+  }
+}
+
+async function selectEmbeddingModel(id: string) {
+  if (embeddingModelSwitching || id === currentEmbeddingModel) return;
+  embeddingModelSwitching = true;
+  renderSettingsMode();
+  try {
+    await invoke("set_embedding_model", { model: id });
+    currentEmbeddingModel = id;
+  } catch (err) {
+    console.error("set_embedding_model failed", err);
+  } finally {
+    embeddingModelSwitching = false;
+    renderSettingsMode();
+  }
+}
+
 // Paints the filled-vs-unfilled portion of the terminal-style block meter
 // (see .weight-slider in styles.css for the mask that cuts this into
 // discrete pixel blocks) as a two-stop gradient on the input's own
@@ -451,10 +546,26 @@ function renderSettingsMode() {
   label.textContent = "search ranking";
   resultsEl.appendChild(label);
 
-  const sliders: Array<{ key: keyof RankingWeights; title: string; hint: string }> = [
-    { key: "semantic", title: "semantic match", hint: "meaning-based similarity" },
-    { key: "fuzzy", title: "filename match", hint: "typo-tolerant filename matching" },
-    { key: "content", title: "content overlap", hint: "literal word overlap in the chunk" },
+  const sliders: Array<{
+    key: keyof RankingWeights;
+    title: string;
+    hint: string;
+  }> = [
+    {
+      key: "semantic",
+      title: "semantic match",
+      hint: "meaning-based similarity",
+    },
+    {
+      key: "fuzzy",
+      title: "filename match",
+      hint: "typo-tolerant filename matching",
+    },
+    {
+      key: "content",
+      title: "content overlap",
+      hint: "literal word overlap in the chunk",
+    },
   ];
 
   for (const { key, title, hint } of sliders) {
@@ -507,6 +618,45 @@ function renderSettingsMode() {
     renderSettingsMode();
   });
   resultsEl.appendChild(reset);
+
+  if (embeddingModels.length > 0) {
+    const modelLabel = document.createElement("li");
+    modelLabel.className = "section-label";
+    modelLabel.textContent = "embedding model";
+    resultsEl.appendChild(modelLabel);
+
+    for (const info of embeddingModels) {
+      const li = document.createElement("li");
+      li.className = "result clickable scope-option";
+      li.addEventListener("click", () => selectEmbeddingModel(info.id));
+
+      const name = document.createElement("span");
+      name.className = "result-name";
+      name.textContent = info.display_name;
+      li.appendChild(name);
+
+      if (info.id === currentEmbeddingModel) {
+        const check = document.createElement("span");
+        check.className = "scope-option-check";
+        check.appendChild(pixelSpinner());
+        li.appendChild(check);
+      }
+
+      const idx = resultRows.push(li) - 1;
+      li.addEventListener("mouseenter", () => {
+        resultSelectedIndex = idx;
+        updateResultSelection();
+      });
+      resultsEl.appendChild(li);
+    }
+
+    if (embeddingModelSwitching) {
+      const status = document.createElement("li");
+      status.className = "result settings-status";
+      status.textContent = "switching model, reindexing continues in the background";
+      resultsEl.appendChild(status);
+    }
+  }
 
   resize();
 }
@@ -579,7 +729,12 @@ async function resize() {
     contentHeight === 0
       ? COLLAPSED_HEIGHT
       : Math.min(COLLAPSED_HEIGHT + 12 + contentHeight, MAX_WINDOW_HEIGHT);
-  console.log("resize(): contentHeight =", contentHeight, "-> window height =", height);
+  console.log(
+    "resize(): contentHeight =",
+    contentHeight,
+    "-> window height =",
+    height,
+  );
   try {
     await getCurrentWindow().setSize(new LogicalSize(WINDOW_WIDTH, height));
   } catch (err) {
@@ -614,7 +769,8 @@ function truncatedBadge(): HTMLElement {
   const badge = document.createElement("span");
   badge.className = "truncated-badge";
   badge.textContent = "truncated";
-  badge.title = "this chunk is longer than the embedding model can fully read — search may miss content near the end";
+  badge.title =
+    "this chunk is longer than the embedding model can fully read, search may miss content near the end";
   return badge;
 }
 
@@ -622,7 +778,9 @@ function renderCitation(citation: Citation, query: string): HTMLElement {
   const li = document.createElement("li");
   li.className = "answer clickable";
   li.title = `open ${basename(citation.path)} at line ${citation.start_line}`;
-  li.addEventListener("click", () => openInEditor(citation.path, citation.start_line));
+  li.addEventListener("click", () =>
+    openInEditor(citation.path, citation.start_line),
+  );
 
   // A "file"-kind citation is prose (or an unchunked language's whole-file
   // blob) — rendered as inline markdown same as before. Anything else came
@@ -661,8 +819,8 @@ function renderCitation(citation: Citation, query: string): HTMLElement {
         end_line: citation.end_line,
         chunk_kind: citation.chunk_kind,
         content: citation.snippet,
-      })
-    )
+      }),
+    ),
   );
 
   return li;
@@ -740,7 +898,7 @@ function renderResponse(response: SearchResponse, query: string) {
           score: r.score,
           content,
         });
-      })
+      }),
     );
     resultsEl.appendChild(li);
   }
@@ -816,7 +974,8 @@ function renderFolderMode() {
 
     folderSuggestions.forEach((path, i) => {
       const li = document.createElement("li");
-      li.className = "result suggestion" + (i === folderSelectedIndex ? " selected" : "");
+      li.className =
+        "result suggestion" + (i === folderSelectedIndex ? " selected" : "");
 
       const name = document.createElement("span");
       name.className = "result-name";
@@ -855,7 +1014,9 @@ function updateFolderSuggestions() {
   if (folderDebounce) clearTimeout(folderDebounce);
   folderDebounce = setTimeout(async () => {
     try {
-      folderSuggestions = await invoke<string[]>("list_dir_suggestions", { partial });
+      folderSuggestions = await invoke<string[]>("list_dir_suggestions", {
+        partial,
+      });
       folderSelectedIndex = 0;
       renderFolderMode();
     } catch (err) {
@@ -881,7 +1042,10 @@ async function enterFolderMode() {
   searchInputEl.value = `${home}/`;
   searchInputEl.placeholder = FOLDER_PLACEHOLDER;
   searchInputEl.focus();
-  searchInputEl.setSelectionRange(searchInputEl.value.length, searchInputEl.value.length);
+  searchInputEl.setSelectionRange(
+    searchInputEl.value.length,
+    searchInputEl.value.length,
+  );
 
   await refreshWatchedFolders();
   renderFolderMode();
@@ -1010,6 +1174,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   refreshWatchedFolders();
   loadRankingWeights();
+  loadEmbeddingModels();
 
   searchInputEl?.addEventListener("input", () => {
     // Typing implicitly abandons the scope picker/settings panel in favor
@@ -1065,7 +1230,10 @@ window.addEventListener("DOMContentLoaded", () => {
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         if (folderSuggestions.length > 0) {
-          folderSelectedIndex = Math.min(folderSelectedIndex + 1, folderSuggestions.length - 1);
+          folderSelectedIndex = Math.min(
+            folderSelectedIndex + 1,
+            folderSuggestions.length - 1,
+          );
           renderFolderMode();
         }
       } else if (e.key === "ArrowUp") {
@@ -1088,7 +1256,10 @@ window.addEventListener("DOMContentLoaded", () => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       if (resultRows.length > 0) {
-        resultSelectedIndex = Math.min(resultSelectedIndex + 1, resultRows.length - 1);
+        resultSelectedIndex = Math.min(
+          resultSelectedIndex + 1,
+          resultRows.length - 1,
+        );
         updateResultSelection(true);
       }
     } else if (e.key === "ArrowUp") {
@@ -1108,10 +1279,14 @@ window.addEventListener("DOMContentLoaded", () => {
       // row is currently highlighted, same as clicking its send button —
       // no manual click needed to grab a chunk you're already hovering.
       const hasTextSelection =
-        !!searchInputEl && searchInputEl.selectionStart !== searchInputEl.selectionEnd;
+        !!searchInputEl &&
+        searchInputEl.selectionStart !== searchInputEl.selectionEnd;
       if (hasTextSelection) return;
 
-      const btn = resultRows[resultSelectedIndex]?.querySelector<HTMLButtonElement>(".send-btn");
+      const btn =
+        resultRows[resultSelectedIndex]?.querySelector<HTMLButtonElement>(
+          ".send-btn",
+        );
       if (btn) {
         e.preventDefault();
         btn.click();

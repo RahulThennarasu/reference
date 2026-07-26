@@ -586,6 +586,20 @@ body {
   color: white;
 }
 
+.settings-status {
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 11px;
+  cursor: default;
+}
+
+/* Not clickable, so it shouldn't pick up `.result:hover`'s highlight
+   either — that rule applies to any `.result` row regardless of whether
+   it's actually interactive, which this one isn't. */
+.settings-status:hover {
+  background: transparent;
+}
+
 /* The scope picker's own choices render inline in #results (see main.ts's
    renderScopeMenu), the same way the folder-suggestions list already does
    — not a native <select> or a floating popover. This app resizes the
@@ -639,14 +653,46 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 14px;
-  height: 14px;
+  width: 8px;
+  height: 24px;
   margin-left: auto;
-  color: #2f83fc;
 }
 
-.scope-option-check svg {
+/* The chase-animation container itself (see pixelSpinner in main.ts) —
+   each block inside is absolutely positioned around its perimeter, so this
+   just needs to be the right size to contain them and establish the
+   positioning context. Tall and narrow (8x24, 3:1) so it reads clearly
+   as a vertical rectangle. */
+.pixel-spinner {
+  position: relative;
   display: block;
-  width: 14px;
-  height: 14px;
+  width: 8px;
+  height: 24px;
+}
+
+.pixel-spinner i {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  background: #fff;
+  opacity: 0;
+  animation: pixel-chase 0.6s linear infinite;
+}
+
+/* Idle blocks are fully invisible (opacity 0) — nothing shows until a
+   block's own turn starts. The fade-out (0% -> 35% of each block's local
+   cycle) is deliberately longer than the 12.5% delay-spacing between
+   blocks, so by the time one block starts, the previous 2-3 are still
+   mid-fade — that overlap is what reads as a comet trail behind the lead
+   pixel, rather than a single dot with nothing following it. */
+@keyframes pixel-chase {
+  0% {
+    opacity: 1;
+  }
+  35% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
 }
