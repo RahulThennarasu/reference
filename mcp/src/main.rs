@@ -37,6 +37,13 @@ struct SearchParams {
     query: String,
     /// How many results to return. Defaults to 5.
     top_k: Option<usize>,
+    /// Scope the search to one watched folder (absolute path), e.g. the
+    /// current project's root. Omit to search everything this machine has
+    /// opted into watching. Set this whenever you know which project the
+    /// query is about — otherwise an unrelated watched folder that merely
+    /// shares some vocabulary with the query can outrank the file that's
+    /// actually relevant.
+    folder: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -91,7 +98,7 @@ impl ReferenceServer {
     )]
     async fn search(
         &self,
-        Parameters(SearchParams { query, top_k }): Parameters<SearchParams>,
+        Parameters(SearchParams { query, top_k, folder }): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let k = top_k.unwrap_or(5);
 
@@ -101,7 +108,7 @@ impl ReferenceServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let hits = self
             .store
-            .hybrid_search(&query, &embedding, k.max(SYNTHESIS_CANDIDATE_POOL))
+            .hybrid_search(&query, &embedding, k.max(SYNTHESIS_CANDIDATE_POOL), folder.as_deref())
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 

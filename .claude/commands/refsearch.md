@@ -4,6 +4,6 @@ argument-hint: [query]
 allowed-tools: mcp__reference-mcp__search
 ---
 
-Call the `mcp__reference-mcp__search` tool with query: $ARGUMENTS
+Call the `mcp__reference-mcp__search` tool with query: $ARGUMENTS and folder: ${CLAUDE_PROJECT_DIR}
 
 Report back the results and citations it returns — do not use grep or Bash for this, the point of this command is to go straight through the MCP tool.

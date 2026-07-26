@@ -100,7 +100,11 @@ async fn search(
     let embedding = state.embedder.embed(&query).map_err(|e| e.to_string())?;
     let hits = state
         .store
-        .hybrid_search(&query, &embedding, top_k.max(SYNTHESIS_CANDIDATE_POOL))
+        // The app's search palette intentionally searches everything the user
+        // has opted into watching, not one folder at a time — folder-scoping
+        // exists for the MCP tool, where an agent usually knows exactly which
+        // project a query is about (see mcp/src/main.rs's `search`).
+        .hybrid_search(&query, &embedding, top_k.max(SYNTHESIS_CANDIDATE_POOL), None)
         .await
         .map_err(|e| e.to_string())?;
 

@@ -163,27 +163,35 @@ impl Store {
     /// than going through LanceDB's ANN index, which is simple and exact at
     /// the scale of a personal file index; revisit if that stops being true
     /// now that chunking means several rows per file instead of one.
+    ///
+    /// `folder`, when set, scopes the scan to rows under that path — the
+    /// same `path LIKE '<folder>/%'` predicate `delete_under` uses, applied
+    /// at the query level via `only_if` so out-of-scope rows are never
+    /// fetched at all, not filtered out after the fact. Without this, a
+    /// query about one watched project can be outranked by an unrelated
+    /// file from a completely different watched folder that merely shares
+    /// some vocabulary — an actual observed failure mode, not a
+    /// hypothetical one (see docs/mcp-agent-usage.md).
     pub async fn hybrid_search(
         &self,
         query_text: &str,
         query_embedding: &[f32],
         k: usize,
+        folder: Option<&str>,
     ) -> Result<Vec<HybridHit>> {
-        let batches = self
-            .table
-            .query()
-            .select(Select::Columns(vec![
-                "path".to_string(),
-                "start_line".to_string(),
-                "end_line".to_string(),
-                "chunk_kind".to_string(),
-                "content".to_string(),
-                "embedding".to_string(),
-            ]))
-            .execute()
-            .await?
-            .try_collect::<Vec<_>>()
-            .await?;
+        let mut query = self.table.query().select(Select::Columns(vec![
+            "path".to_string(),
+            "start_line".to_string(),
+            "end_line".to_string(),
+            "chunk_kind".to_string(),
+            "content".to_string(),
+            "embedding".to_string(),
+        ]));
+        if let Some(folder) = folder {
+            let folder = folder.trim_end_matches('/').replace('\'', "''");
+            query = query.only_if(format!("path LIKE '{folder}/%'"));
+        }
+        let batches = query.execute().await?.try_collect::<Vec<_>>().await?;
 
         let matcher = SkimMatcherV2::default();
         let mut hits = Vec::new();

@@ -36,10 +36,11 @@ See `README.md`'s "using the mcp server with claude code" section for the end-us
 
 Input:
 ```json
-{ "query": "how does the hybrid search combine fuzzy and semantic scores", "top_k": 5 }
+{ "query": "how does the hybrid search combine fuzzy and semantic scores", "top_k": 5, "folder": "/Users/you/Documents/GitHub/reference" }
 ```
 - `query`: natural language, not a grep pattern — describe behavior or intent, not a literal string.
 - `top_k`: optional, defaults to 5.
+- `folder`: optional, scopes the search to one watched folder (absolute path). Set this whenever the agent knows which project the query is about — without it, an unrelated watched folder that merely shares some vocabulary with the query can outrank the file that's actually relevant. This was an actual observed failure: a query about this repo's own MCP server returned a file from a completely different watched project ahead of the correct one, purely on coincidental word overlap. Filtering happens at the query level (`only_if`), not after fetching results, so out-of-scope rows are never scored at all.
 
 Output (JSON text content):
 ```json
