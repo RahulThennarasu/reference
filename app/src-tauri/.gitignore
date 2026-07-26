@@ -6,3 +6,7 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 /data
+
+# Copied in from `cargo build -p reference-mcp --release` before `tauri build`,
+# per-machine/per-target-triple, not something to check in.
+/binaries

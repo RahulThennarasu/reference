@@ -67,4 +67,16 @@ this app is the real version: an actual local index of your files, kept current 
 
 watch, embed, store, and hybrid search all work end-to-end through the tauri app, backed by one index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, and javascript (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result. the `reference-cli` binary (a shell-out-and-parse-json interface for coding agents) has been removed in favor of an MCP server (`mcp/`, package `reference-mcp`) exposing the same search over the same index, keeping the embedding model warm across calls instead of reloading it per invocation like the old CLI did.
 
-no packaged installer/distribution yet (no code signing, no notarization, no release workflow), building from source (`pnpm tauri build`) is the only way to run it today. a release build currently produces a ~102mb `.app` (~41mb `.dmg`), down from an initial ~220mb before tuning `[profile.release]` (`strip`, `lto`, `codegen-units = 1`), most of the remaining size is from statically linking candle, lancedb (arrow + datafusion + lance), and four tree-sitter grammars into one binary.
+no packaged installer/distribution yet (no code signing, no notarization, no release workflow), building from source (`pnpm tauri build`) is the only way to run it today. a release build currently produces a ~102mb `.app` (~41mb `.dmg`), down from an initial ~220mb before tuning `[profile.release]` (`strip`, `lto`, `codegen-units = 1`), most of the remaining size is from statically linking candle, lancedb (arrow + datafusion + lance), and four tree-sitter grammars into one binary. the `reference-mcp` binary ships inside the app bundle too, via tauri's `externalBin` sidecar mechanism (`app/src-tauri/scripts/prepare-mcp-sidecar.sh`, run automatically before every `tauri build`) — see below for how to point claude code at it.
+
+## using the mcp server with claude code
+
+once you have the app built/installed (see above — no packaged installer yet, so this still means building from source for now), the `reference-mcp` binary is already inside the app bundle, verified at `Contents/MacOS/reference-mcp`, right alongside the main app binary:
+
+```
+claude mcp add --scope user reference-mcp -- /path/to/reference.app/Contents/MacOS/reference-mcp
+```
+
+(on a normal install this would be `/Applications/reference.app/Contents/MacOS/reference-mcp`; adjust the path to wherever your build landed, e.g. `target/debug/bundle/macos/reference.app/...` for a local dev build).
+
+verify with `claude mcp list` — should show `reference-mcp ✔ Connected`. it only searches folders you've already added to the app (⌘7); see `docs/mcp-agent-usage.md` for the full tool reference, the `/refsearch` command, and caveats.
