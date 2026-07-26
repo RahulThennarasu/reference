@@ -59,7 +59,7 @@ Ranking itself blends three signals, not two: semantic similarity, fuzzy filenam
 
 ## `/refsearch` — explicit invocation
 
-Tool selection is a model decision; `CLAUDE.md` telling an agent to "prefer this over grep" is guidance, not an enforced rule, and in practice grep still sometimes wins when it's the faster-looking path for a given question. `.claude/commands/refsearch.md` is the reliable alternative: typing `/refsearch <query>` in a Claude Code session calls `mcp__reference-mcp__search` directly with the typed text, bypassing tool-choice uncertainty entirely.
+Tool selection is a model decision; `CLAUDE.md` telling an agent to "prefer this over grep" is guidance, not an enforced rule, and in practice grep still sometimes wins when it's the faster-looking path for a given question. `.claude/commands/refsearch.md` is the reliable alternative: typing `/refsearch <query>` in a Claude Code session calls `mcp__reference-mcp__search` directly with the typed text, bypassing tool-choice uncertainty entirely — and passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, so it's scoped to whatever project the session is actually in by default, same reasoning as the `folder` param above. A personal, cross-project copy also lives at `~/.claude/commands/refsearch.md`, for using the command outside this repo — same auto-scoping behavior, since `${CLAUDE_PROJECT_DIR}` resolves per-session, not to this repo specifically.
 
 ## when to use this vs grep
 
