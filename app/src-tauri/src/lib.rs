@@ -96,15 +96,21 @@ async fn search(
     state: State<'_, AppState>,
     query: String,
     top_k: usize,
+    // Optional, same param the MCP `search` tool already has (see
+    // mcp/src/main.rs). The UI only surfaces the scope picker once more than
+    // one folder is watched — with zero or one, "scope to a folder" and
+    // "search everything" mean the same thing, so there's nothing to pick.
+    folder: Option<String>,
 ) -> Result<SearchResponse, String> {
     let embedding = state.embedder.embed(&query).map_err(|e| e.to_string())?;
     let hits = state
         .store
-        // The app's search palette intentionally searches everything the user
-        // has opted into watching, not one folder at a time — folder-scoping
-        // exists for the MCP tool, where an agent usually knows exactly which
-        // project a query is about (see mcp/src/main.rs's `search`).
-        .hybrid_search(&query, &embedding, top_k.max(SYNTHESIS_CANDIDATE_POOL), None)
+        .hybrid_search(
+            &query,
+            &embedding,
+            top_k.max(SYNTHESIS_CANDIDATE_POOL),
+            folder.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())?;
 

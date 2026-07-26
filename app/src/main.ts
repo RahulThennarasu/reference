@@ -272,11 +272,117 @@ const FOLDER_PLACEHOLDER = "type a folder path — tab to complete, enter to wat
 let searchInputEl: HTMLInputElement | null;
 let resultsEl: HTMLElement | null;
 let copyAllBtnEl: HTMLButtonElement | null;
+let scopeBtnEl: HTMLButtonElement | null;
+let scopeLabelEl: HTMLElement | null;
 
 let folderMode = false;
 let folderSuggestions: string[] = [];
 let folderSelectedIndex = 0;
 let watchedFolders: string[] = [];
+
+// "" means unscoped (search everything watched). Kept as the full folder
+// path, same value the backend's `folder` param expects.
+let searchScope = "";
+let scopePickerOpen = false;
+
+// Updates the scope button's label/visibility from the current
+// watched-folder list. Hidden entirely unless there's an actual choice to
+// make — with zero or one folder watched, "scope to a folder" and "search
+// everything" are the same thing, so a picker would just be clutter.
+function updateScopeButton() {
+  if (!scopeBtnEl || !scopeLabelEl) return;
+
+  if (watchedFolders.length <= 1) {
+    scopeBtnEl.classList.remove("visible");
+    searchScope = "";
+    return;
+  }
+
+  if (!watchedFolders.includes(searchScope)) {
+    searchScope = "";
+  }
+
+  scopeLabelEl.textContent = searchScope ? basename(searchScope) : "All folders";
+  scopeBtnEl.classList.add("visible");
+}
+
+const CHECK_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+
+// Renders the scope choices inline into #results, the same list the search
+// results/folder-suggestions already occupy — see the .scope-btn comment in
+// styles.css for why this isn't a floating popover.
+function renderScopeMenu() {
+  if (!resultsEl) return;
+  resultsEl.innerHTML = "";
+  lastResponse = null;
+  updateCopyAllVisibility();
+  resetResultRows();
+
+  const options: { value: string; label: string; path: string | null }[] = [
+    { value: "", label: "All folders", path: null },
+    ...watchedFolders.map((folder) => ({ value: folder, label: basename(folder), path: folder })),
+  ];
+
+  for (const option of options) {
+    const li = document.createElement("li");
+    li.className = "result clickable scope-option";
+    li.addEventListener("click", () => selectScope(option.value));
+
+    if (option.path) {
+      li.appendChild(iconImg(folderIconUrl(option.path)));
+    }
+
+    const name = document.createElement("span");
+    name.className = "result-name";
+    name.textContent = option.label;
+    li.appendChild(name);
+
+    if (option.path) {
+      const dir = document.createElement("span");
+      dir.className = "result-path";
+      dir.textContent = option.path;
+      li.appendChild(dir);
+    }
+
+    if (option.value === searchScope) {
+      const check = document.createElement("span");
+      check.className = "scope-option-check";
+      check.innerHTML = CHECK_SVG;
+      li.appendChild(check);
+    }
+
+    const idx = resultRows.push(li) - 1;
+    li.addEventListener("mouseenter", () => {
+      resultSelectedIndex = idx;
+      updateResultSelection();
+    });
+    resultsEl.appendChild(li);
+  }
+
+  resultSelectedIndex = 0;
+  updateResultSelection();
+  resize();
+}
+
+function openScopeMenu() {
+  if (folderMode) exitFolderMode();
+  scopePickerOpen = true;
+  scopeBtnEl?.classList.add("active");
+  renderScopeMenu();
+}
+
+function closeScopeMenu() {
+  scopePickerOpen = false;
+  scopeBtnEl?.classList.remove("active");
+  search();
+}
+
+function selectScope(value: string) {
+  searchScope = value;
+  updateScopeButton();
+  closeScopeMenu();
+}
 
 // The currently rendered citation/result rows, in on-screen order, and
 // which one is keyboard-highlighted. A launcher like this is used
@@ -290,11 +396,17 @@ function resetResultRows() {
   resultSelectedIndex = -1;
 }
 
-function updateResultSelection() {
+// `scroll` defaults to false: hovering a row already means it's visible
+// under the cursor, so auto-scrolling on hover just yanks the list around
+// under the mouse. Keyboard navigation (arrow keys) is the one case that
+// actually needs the list to follow the selection into view.
+function updateResultSelection(scroll = false) {
   resultRows.forEach((row, i) => {
     row.classList.toggle("selected", i === resultSelectedIndex);
   });
-  resultRows[resultSelectedIndex]?.scrollIntoView({ block: "nearest" });
+  if (scroll) {
+    resultRows[resultSelectedIndex]?.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function basename(path: string): string {
@@ -561,6 +673,8 @@ async function refreshWatchedFolders() {
   } catch (err) {
     console.error("list_watched failed", err);
   }
+  updateScopeButton();
+  if (scopePickerOpen) renderScopeMenu();
 }
 
 let folderDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -584,6 +698,8 @@ function updateFolderSuggestions() {
 async function enterFolderMode() {
   if (!searchInputEl) return;
   folderMode = true;
+  scopePickerOpen = false;
+  scopeBtnEl?.classList.remove("active");
 
   let home = "/";
   try {
@@ -678,6 +794,7 @@ async function runSearch(query: string) {
     const response = await invoke<SearchResponse>("search", {
       query,
       topK: MAX_VISIBLE_ROWS,
+      folder: searchScope || undefined,
     });
     renderResponse(response, query);
   } catch (err) {
@@ -697,10 +814,27 @@ window.addEventListener("DOMContentLoaded", () => {
   searchInputEl = document.querySelector("#search-input");
   resultsEl = document.querySelector("#results");
   copyAllBtnEl = document.querySelector("#copy-all-btn");
+  scopeBtnEl = document.querySelector("#scope-btn");
+  scopeLabelEl = document.querySelector("#scope-label");
 
   copyAllBtnEl?.addEventListener("click", () => copyAllVisible());
 
+  scopeBtnEl?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (scopePickerOpen) {
+      closeScopeMenu();
+    } else {
+      openScopeMenu();
+    }
+  });
+
+  refreshWatchedFolders();
+
   searchInputEl?.addEventListener("input", () => {
+    // Typing implicitly abandons the scope picker in favor of an actual
+    // search, same as it would for any other transient overlay.
+    if (scopePickerOpen) scopePickerOpen = false;
+
     if (folderMode) {
       updateFolderSuggestions();
     } else {
@@ -712,6 +846,8 @@ window.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Escape") {
       if (folderMode) {
         exitFolderMode();
+      } else if (scopePickerOpen) {
+        closeScopeMenu();
       } else {
         getCurrentWindow().close();
       }
@@ -758,13 +894,13 @@ window.addEventListener("DOMContentLoaded", () => {
       e.preventDefault();
       if (resultRows.length > 0) {
         resultSelectedIndex = Math.min(resultSelectedIndex + 1, resultRows.length - 1);
-        updateResultSelection();
+        updateResultSelection(true);
       }
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       if (resultRows.length > 0) {
         resultSelectedIndex = Math.max(resultSelectedIndex - 1, 0);
-        updateResultSelection();
+        updateResultSelection(true);
       }
     } else if (e.key === "Enter") {
       e.preventDefault();
