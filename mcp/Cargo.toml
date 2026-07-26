@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reference-core = { path = "../core" }
-
 rmcp = { version = "2.2.0", features = ["server", "transport-io"] }
 schemars = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
@@ -14,6 +12,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Platform-conditional, same as the app's own `tauri.macos.conf.json`
+# (`build.features: ["metal"]`), but applied at the dependency level so it
+# takes effect for every invocation automatically — plain `cargo build`,
+# `cargo check`, `cargo run --example`, rust-analyzer — not just one build
+# script. Without this, reference-mcp (no metal by default) and the app
+# (always metal on macOS) kept flip-flopping the feature set used to compile
+# the shared candle/arrow/datafusion/lance dependency tree, forcing a full
+# recompile of all of it on every switch between the two.
+[target.'cfg(target_os = "macos")'.dependencies]
+reference-core = { path = "../core", features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+reference-core = { path = "../core" }
 
 [features]
 default = []

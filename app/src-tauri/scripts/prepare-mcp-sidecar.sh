@@ -16,19 +16,12 @@ if [[ "$TARGET_TRIPLE" == *windows* ]]; then
   EXT=".exe"
 fi
 
-# Mirrors tauri.macos.conf.json's `build.features: ["metal"]` override for
-# the main app binary — reference-mcp is a plain cargo crate with no Tauri
-# config layer of its own, so the equivalent has to happen here instead of
-# via a platform-specific config file. Same reasoning: embedding without a
-# GPU backend still works, it's just slower, and this is the sidecar an
-# agent calls on every single search, so the speed matters here too.
-FEATURE_ARGS=()
-if [[ "$TARGET_TRIPLE" == *apple-darwin* ]]; then
-  FEATURE_ARGS=(--features metal)
-fi
-
-echo "building reference-mcp (release) for $TARGET_TRIPLE${FEATURE_ARGS:+ with ${FEATURE_ARGS[1]}}..."
-(cd "$WORKSPACE_ROOT" && cargo build -p reference-mcp --release "${FEATURE_ARGS[@]}")
+# mcp/Cargo.toml makes reference-core pull in the `metal` feature
+# automatically on macOS (a target-conditional dependency, mirroring
+# tauri.macos.conf.json's `build.features: ["metal"]` override for the main
+# app binary) — no explicit --features flag needed here.
+echo "building reference-mcp (release) for $TARGET_TRIPLE..."
+(cd "$WORKSPACE_ROOT" && cargo build -p reference-mcp --release)
 
 mkdir -p "$SRC_TAURI_DIR/binaries"
 cp "$WORKSPACE_ROOT/target/release/reference-mcp$EXT" \

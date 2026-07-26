@@ -11,13 +11,24 @@ use reference_core::watcher;
 use serde::Serialize;
 use tauri::State;
 
+/// The stop flag alone isn't enough to safely purge a folder's indexed rows:
+/// `watcher::watch`'s loop only checks it *before* waiting for the next
+/// filesystem event, so an event already queued when the flag flips still
+/// gets fully processed (including an `upsert`) after the flag is set. The
+/// join handle lets `stop_watch` actually wait for the thread to exit —
+/// past its last possible upsert — before running `delete_under`, instead
+/// of racing a delete against a straggling write.
+struct WatchHandle {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
 struct AppState {
     embedder: Arc<Embedder>,
     store: Arc<Store>,
-    // Each entry gets its own background watch thread plus the flag used to
-    // stop it; re-adding an already-watched folder is a no-op instead of
-    // spawning a duplicate.
-    watching: Mutex<HashMap<PathBuf, Arc<AtomicBool>>>,
+    // Each entry gets its own background watch thread; re-adding an
+    // already-watched folder is a no-op instead of spawning a duplicate.
+    watching: Mutex<HashMap<PathBuf, WatchHandle>>,
 }
 
 fn load_watched_folders() -> Vec<String> {
@@ -219,19 +230,23 @@ fn start_watching_folder(state: &AppState, folder: String) -> Result<(), String>
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    {
-        let mut watching = state.watching.lock().map_err(|e| e.to_string())?;
-        if watching.contains_key(&path) {
-            return Ok(());
-        }
-        watching.insert(path.clone(), stop.clone());
+    // Held across the check, the thread spawn, and the insert, same as the
+    // original check-then-insert did, so two concurrent calls for the same
+    // folder can't both pass the guard before either registers — spawning
+    // is just an OS call that returns immediately with a handle, it doesn't
+    // block on the thread's actual work, so holding the lock through it is
+    // cheap.
+    let mut watching = state.watching.lock().map_err(|e| e.to_string())?;
+    if watching.contains_key(&path) {
+        return Ok(());
     }
-    save_watched_folders(state);
 
     let embedder = state.embedder.clone();
     let store = state.store.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = std::fs::create_dir_all(&path) {
+    let thread_stop = stop.clone();
+    let thread_path = path.clone();
+    let thread = std::thread::spawn(move || {
+        if let Err(e) = std::fs::create_dir_all(&thread_path) {
             eprintln!("failed to create watch folder: {e}");
             return;
         }
@@ -242,10 +257,14 @@ fn start_watching_folder(state: &AppState, folder: String) -> Result<(), String>
                 return;
             }
         };
-        if let Err(e) = rt.block_on(watcher::watch(&path, &embedder, &store, stop)) {
+        if let Err(e) = rt.block_on(watcher::watch(&thread_path, &embedder, &store, thread_stop)) {
             eprintln!("watch loop exited with error: {e}");
         }
     });
+
+    watching.insert(path, WatchHandle { stop, thread });
+    drop(watching);
+    save_watched_folders(state);
 
     Ok(())
 }
@@ -255,20 +274,35 @@ fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String>
     start_watching_folder(&state, folder)
 }
 
-/// Stops watching `folder`: signals its background thread to exit (it
-/// notices within ~300ms), drops it from the persisted folder list, and
-/// purges every already-indexed row under it so it actually stops being
-/// searchable rather than just stopping being updated.
+/// Stops watching `folder`: signals its background thread to exit, waits
+/// for it to actually confirm that (up to ~300ms, see `watcher::watch`'s
+/// loop), drops it from the persisted folder list, and only then purges
+/// every already-indexed row under it. The wait matters: without it, an
+/// already-queued filesystem event the thread was mid-processing can call
+/// `upsert` *after* the purge runs, silently resurrecting a row for a
+/// folder that was just removed.
 #[tauri::command]
 async fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), String> {
     let path = PathBuf::from(&folder);
     let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-    {
+
+    let watch_handle = {
         let mut watching = state.watching.lock().map_err(|e| e.to_string())?;
-        if let Some(stop) = watching.remove(&path) {
-            stop.store(true, Ordering::Relaxed);
-        }
+        watching.remove(&path)
+    };
+
+    if let Some(WatchHandle { stop, thread }) = watch_handle {
+        stop.store(true, Ordering::Relaxed);
+        tokio::task::spawn_blocking(move || {
+            // Nothing meaningful to do with a join error (thread panicked);
+            // either way the thread is no longer running, which is all
+            // we're waiting to confirm here.
+            let _ = thread.join();
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
+
     save_watched_folders(&state);
 
     state
