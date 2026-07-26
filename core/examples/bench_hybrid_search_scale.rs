@@ -7,7 +7,7 @@
 //   cargo run -p reference-core --example bench_hybrid_search_scale --release
 use std::time::Instant;
 
-use reference_core::store::{ChunkRecord, Store};
+use reference_core::store::{ChunkRecord, RankingWeights, Store};
 
 const EMBEDDING_DIM: usize = 384;
 const CHECKPOINTS: &[usize] = &[1_000, 5_000, 20_000, 50_000];
@@ -61,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
                     kind: "function".to_string(),
                     content: format!("fn synthetic_{batch_idx}_{i}() {{ /* bench filler */ }}"),
                     embedding: random_normalized_embedding(&mut rng),
+                    name: format!("synthetic_{batch_idx}_{i}"),
+                    truncated: false,
                 })
                 .collect();
             store
@@ -76,7 +78,9 @@ async fn main() -> anyhow::Result<()> {
         let mut timings = Vec::new();
         for _ in 0..8 {
             let start = Instant::now();
-            let hits = store.hybrid_search("synthetic query text", &query_embedding, 8, None).await?;
+            let hits = store
+                .hybrid_search("synthetic query text", &query_embedding, 8, None, &RankingWeights::default())
+                .await?;
             timings.push(start.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(&hits);
         }

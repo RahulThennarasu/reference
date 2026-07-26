@@ -20,7 +20,7 @@ use serde_json::json;
 
 use reference_core::embedding::Embedder;
 use reference_core::paths;
-use reference_core::store::Store;
+use reference_core::store::{RankingWeights, Store};
 use reference_core::synthesize;
 
 // Mirrors the Tauri app's `SYNTHESIS_CANDIDATE_POOL` (app/src-tauri/src/lib.rs):
@@ -106,9 +106,20 @@ impl ReferenceServer {
             .embedder
             .embed(&query)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Fixed defaults, not user-adjustable: ranking-weight tuning (gap #5,
+        // docs/feature-gaps.md) is an app-only knob, same reasoning as
+        // folder scoping/exact-match lookup staying app-only elsewhere —
+        // this is a stdio tool call from an agent, not a session with
+        // persisted per-user settings to read.
         let hits = self
             .store
-            .hybrid_search(&query, &embedding, k.max(SYNTHESIS_CANDIDATE_POOL), folder.as_deref())
+            .hybrid_search(
+                &query,
+                &embedding,
+                k.max(SYNTHESIS_CANDIDATE_POOL),
+                folder.as_deref(),
+                &RankingWeights::default(),
+            )
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 

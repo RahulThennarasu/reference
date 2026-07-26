@@ -12,6 +12,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{connect, Connection, Table};
+use serde::{Deserialize, Serialize};
 
 use crate::embedding::EMBEDDING_DIM;
 use crate::synthesize::is_question;
@@ -29,16 +30,41 @@ const TABLE_NAME: &str = "files";
 // queries, per the same reasoning as `is_question` below: filename fuzzy
 // matching stops making sense against a full sentence, but content overlap
 // still does, so its share of the total stays fixed across both branches.
-const SEMANTIC_WEIGHT: f32 = 0.55;
-const FUZZY_WEIGHT: f32 = 0.30;
-const CONTENT_MATCH_WEIGHT: f32 = 0.15;
+// These are now user-adjustable defaults (see `RankingWeights` below), not
+// hardwired — gap #5 in docs/feature-gaps.md.
+const DEFAULT_SEMANTIC_WEIGHT: f32 = 0.55;
+const DEFAULT_FUZZY_WEIGHT: f32 = 0.30;
+const DEFAULT_CONTENT_MATCH_WEIGHT: f32 = 0.15;
 // Soft-normalizes fuzzy-matcher's unbounded integer score into [0, 1):
-// score / (score + K), so it saturates smoothly instead of clipping.
+// score / (score + K), so it saturates smoothly instead of clipping. Not
+// user-adjustable: it's a normalization detail of the fuzzy matcher, not a
+// ranking preference.
 const FUZZY_SATURATION: f32 = 50.0;
 // Query tokens shorter than this are dropped before content-overlap scoring
 // — short words ("a", "is", "to") are too common to be a meaningful signal
 // and would inflate overlap fraction for nearly any chunk.
 const CONTENT_MATCH_MIN_TOKEN_LEN: usize = 3;
+
+/// User-adjustable weights for `hybrid_search`'s three ranking signals.
+/// Query-time scoring only — not baked into stored embeddings, so changing
+/// these never requires a reindex (unlike gap #3/#4's schema columns).
+/// `Default` matches this project's original hand-tuned constants.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RankingWeights {
+    pub semantic: f32,
+    pub fuzzy: f32,
+    pub content: f32,
+}
+
+impl Default for RankingWeights {
+    fn default() -> Self {
+        Self {
+            semantic: DEFAULT_SEMANTIC_WEIGHT,
+            fuzzy: DEFAULT_FUZZY_WEIGHT,
+            content: DEFAULT_CONTENT_MATCH_WEIGHT,
+        }
+    }
+}
 
 pub struct HybridHit {
     pub path: String,
@@ -199,6 +225,7 @@ impl Store {
         query_embedding: &[f32],
         k: usize,
         folder: Option<&str>,
+        weights: &RankingWeights,
     ) -> Result<Vec<HybridHit>> {
         let mut query = self.table.query().select(Select::Columns(vec![
             "path".to_string(),
@@ -228,11 +255,11 @@ impl Store {
         // shaped queries (per the same heuristic `synthesize` uses to decide
         // whether to answer at all) skip the fuzzy component entirely and
         // rank on semantic similarity alone.
-        let fuzzy_weight = if is_question(query_text) { 0.0 } else { FUZZY_WEIGHT };
+        let fuzzy_weight = if is_question(query_text) { 0.0 } else { weights.fuzzy };
         let semantic_weight = if is_question(query_text) {
-            SEMANTIC_WEIGHT + FUZZY_WEIGHT
+            weights.semantic + weights.fuzzy
         } else {
-            SEMANTIC_WEIGHT
+            weights.semantic
         };
         let query_terms = content_match_terms(query_text);
 
@@ -293,7 +320,7 @@ impl Store {
 
                 let score = semantic_weight * semantic_sim
                     + fuzzy_weight * fuzzy_sim
-                    + CONTENT_MATCH_WEIGHT * content_match_sim;
+                    + weights.content * content_match_sim;
                 hits.push(HybridHit {
                     path,
                     content,

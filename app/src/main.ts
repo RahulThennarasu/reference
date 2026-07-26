@@ -116,6 +116,14 @@ interface SearchResponse {
   citations: Citation[];
 }
 
+interface RankingWeights {
+  semantic: number;
+  fuzzy: number;
+  content: number;
+}
+
+const DEFAULT_RANKING_WEIGHTS: RankingWeights = { semantic: 0.55, fuzzy: 0.3, content: 0.15 };
+
 // VSCode registers this URI scheme itself; no shell-out or `code` CLI
 // dependency needed. Falls back to just opening the file if the line lookup
 // or the open itself fails, rather than doing nothing.
@@ -277,6 +285,7 @@ let resultsEl: HTMLElement | null;
 let copyAllBtnEl: HTMLButtonElement | null;
 let scopeBtnEl: HTMLButtonElement | null;
 let scopeLabelEl: HTMLElement | null;
+let settingsBtnEl: HTMLButtonElement | null;
 
 let folderMode = false;
 let folderSuggestions: string[] = [];
@@ -370,6 +379,7 @@ function renderScopeMenu() {
 
 function openScopeMenu() {
   if (folderMode) exitFolderMode();
+  settingsMode = false;
   scopePickerOpen = true;
   scopeBtnEl?.classList.add("active");
   renderScopeMenu();
@@ -385,6 +395,136 @@ function selectScope(value: string) {
   searchScope = value;
   updateScopeButton();
   closeScopeMenu();
+}
+
+let settingsMode = false;
+let rankingWeights: RankingWeights = { ...DEFAULT_RANKING_WEIGHTS };
+let weightsSaveDebounce: ReturnType<typeof setTimeout> | null = null;
+
+async function loadRankingWeights() {
+  try {
+    rankingWeights = await invoke<RankingWeights>("get_ranking_weights");
+  } catch (err) {
+    console.error("get_ranking_weights failed", err);
+  }
+}
+
+// Debounced, not one call per slider tick — dragging a slider fires `input`
+// dozens of times a second, and persisting to disk on every one of those
+// would be wasteful (same reasoning as `search()`'s own debounce).
+function saveRankingWeights() {
+  if (weightsSaveDebounce) clearTimeout(weightsSaveDebounce);
+  weightsSaveDebounce = setTimeout(() => {
+    invoke("set_ranking_weights", { weights: rankingWeights }).catch((err) => {
+      console.error("set_ranking_weights failed", err);
+    });
+  }, 200);
+}
+
+// Paints the filled-vs-unfilled portion of the terminal-style block meter
+// (see .weight-slider in styles.css for the mask that cuts this into
+// discrete pixel blocks) as a two-stop gradient on the input's own
+// background — solid white up to the current value, dim white past it,
+// monochrome to read as a CLI-style loading bar rather than a UI control.
+// Recomputed on every input event so it tracks live while dragging.
+function updateSliderFill(slider: HTMLInputElement) {
+  const min = Number(slider.min);
+  const max = Number(slider.max);
+  const pct = ((Number(slider.value) - min) / (max - min)) * 100;
+  slider.style.background = `linear-gradient(to right, #ffffff ${pct}%, rgba(255, 255, 255, 0.2) ${pct}%)`;
+}
+
+// Query-time weights only (see RankingWeights's doc comment in store.rs) —
+// no index rebuild, no restart, a change here applies to the very next
+// search. Rendered inline in #results, same reasoning as the scope picker:
+// this app resizes the actual OS window to fit #results' content, so a
+// floating settings popover risks getting clipped by the window bounds.
+function renderSettingsMode() {
+  if (!resultsEl) return;
+  resultsEl.innerHTML = "";
+  lastResponse = null;
+  updateCopyAllVisibility();
+  resetResultRows();
+
+  const label = document.createElement("li");
+  label.className = "section-label";
+  label.textContent = "search ranking";
+  resultsEl.appendChild(label);
+
+  const sliders: Array<{ key: keyof RankingWeights; title: string; hint: string }> = [
+    { key: "semantic", title: "semantic match", hint: "meaning-based similarity" },
+    { key: "fuzzy", title: "filename match", hint: "typo-tolerant filename matching" },
+    { key: "content", title: "content overlap", hint: "literal word overlap in the chunk" },
+  ];
+
+  for (const { key, title, hint } of sliders) {
+    const row = document.createElement("li");
+    row.className = "result settings-row";
+
+    const info = document.createElement("div");
+    info.className = "settings-row-info";
+    const name = document.createElement("span");
+    name.className = "result-name";
+    name.textContent = title;
+    const desc = document.createElement("span");
+    desc.className = "result-path";
+    desc.textContent = hint;
+    info.appendChild(name);
+    info.appendChild(desc);
+
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.className = "weight-slider";
+    slider.min = "0";
+    slider.max = "1";
+    slider.step = "0.05";
+    slider.value = String(rankingWeights[key]);
+    updateSliderFill(slider);
+
+    const value = document.createElement("span");
+    value.className = "weight-value";
+    value.textContent = rankingWeights[key].toFixed(2);
+
+    slider.addEventListener("input", () => {
+      rankingWeights[key] = Number(slider.value);
+      value.textContent = rankingWeights[key].toFixed(2);
+      updateSliderFill(slider);
+      saveRankingWeights();
+    });
+
+    row.appendChild(info);
+    row.appendChild(slider);
+    row.appendChild(value);
+    resultsEl.appendChild(row);
+  }
+
+  const reset = document.createElement("li");
+  reset.className = "result clickable settings-reset";
+  reset.textContent = "reset to defaults";
+  reset.addEventListener("click", () => {
+    rankingWeights = { ...DEFAULT_RANKING_WEIGHTS };
+    saveRankingWeights();
+    renderSettingsMode();
+  });
+  resultsEl.appendChild(reset);
+
+  resize();
+}
+
+function openSettingsMode() {
+  if (folderMode) exitFolderMode();
+  // Reset scope-picker state directly rather than via closeScopeMenu(),
+  // which schedules a debounced search() that would land ~150ms later and
+  // clobber the settings sliders just rendered below.
+  scopePickerOpen = false;
+  scopeBtnEl?.classList.remove("active");
+  settingsMode = true;
+  renderSettingsMode();
+}
+
+function closeSettingsMode() {
+  settingsMode = false;
+  search();
 }
 
 // The currently rendered citation/result rows, in on-screen order, and
@@ -729,6 +869,7 @@ async function enterFolderMode() {
   folderMode = true;
   scopePickerOpen = false;
   scopeBtnEl?.classList.remove("active");
+  settingsMode = false;
 
   let home = "/";
   try {
@@ -845,6 +986,7 @@ window.addEventListener("DOMContentLoaded", () => {
   copyAllBtnEl = document.querySelector("#copy-all-btn");
   scopeBtnEl = document.querySelector("#scope-btn");
   scopeLabelEl = document.querySelector("#scope-label");
+  settingsBtnEl = document.querySelector("#settings-btn");
 
   copyAllBtnEl?.addEventListener("click", () => copyAllVisible());
 
@@ -857,12 +999,24 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  settingsBtnEl?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (settingsMode) {
+      closeSettingsMode();
+    } else {
+      openSettingsMode();
+    }
+  });
+
   refreshWatchedFolders();
+  loadRankingWeights();
 
   searchInputEl?.addEventListener("input", () => {
-    // Typing implicitly abandons the scope picker in favor of an actual
-    // search, same as it would for any other transient overlay.
+    // Typing implicitly abandons the scope picker/settings panel in favor
+    // of an actual search, same as it would for any other transient
+    // overlay.
     if (scopePickerOpen) scopePickerOpen = false;
+    if (settingsMode) settingsMode = false;
 
     if (folderMode) {
       updateFolderSuggestions();
@@ -877,8 +1031,20 @@ window.addEventListener("DOMContentLoaded", () => {
         exitFolderMode();
       } else if (scopePickerOpen) {
         closeScopeMenu();
+      } else if (settingsMode) {
+        closeSettingsMode();
       } else {
         getCurrentWindow().close();
+      }
+      return;
+    }
+
+    if (e.key === "," && e.metaKey) {
+      e.preventDefault();
+      if (settingsMode) {
+        closeSettingsMode();
+      } else {
+        openSettingsMode();
       }
       return;
     }

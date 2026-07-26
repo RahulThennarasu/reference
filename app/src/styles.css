@@ -66,7 +66,12 @@ body {
 #results {
   list-style: none;
   margin: 0;
-  padding: 0 10px 10px;
+  /* Bottom/side padding is intentionally a bit more than the window's own
+     12px corner radius (see html/body above) — a row's rounded hover/
+     selected box sitting right at that edge gets visually clipped by the
+     window's own corner curve otherwise (most noticeable on the very last
+     row, which sits closest to the bottom corners on both axes at once). */
+  padding: 0 14px 14px;
   overflow-y: auto;
   flex: 1;
   scrollbar-width: none; /* Firefox */
@@ -452,6 +457,133 @@ body {
    than introducing a separate green just for this button. */
 .copy-all-btn.sent {
   color: #2f83fc;
+}
+
+/* Unlike .copy-all-btn, always visible rather than hidden until there's
+   content — ranking weights are relevant regardless of what's currently
+   on screen, so there's no "nothing to act on yet" state to hide behind. */
+.settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  line-height: 0;
+  transition: color 0.12s, background 0.12s;
+}
+
+/* icon_blank.png (served from public/settings-icon.png, resized down from
+   the original) — a raster image, not an inlined SVG like the app's other
+   icons, so it can't pick up `color: currentColor` for hover feedback;
+   `opacity` does that job instead. Height-constrained with width auto
+   (the source is portrait, 80x128) so it scales down without distorting.
+   `image-rendering: pixelated` keeps the downscale crisp/blocky rather
+   than letting the browser smooth it into a blur. */
+.settings-icon {
+  display: block;
+  height: 16px;
+  width: auto;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  opacity: 0.55;
+  transition: opacity 0.12s;
+}
+
+.settings-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.settings-btn:hover .settings-icon {
+  opacity: 1;
+}
+
+/* Rendered inline in #results by renderSettingsMode (main.ts) — see the
+   scope-picker comment above for why this app avoids floating popovers.
+   `.result`'s flex layout doesn't quite fit a label + slider + value row,
+   so this overrides just enough to fit three parts across the row instead
+   of the icon/name/path arrangement every other row uses. */
+.settings-row {
+  gap: 14px;
+  cursor: default;
+}
+
+.settings-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Terminal-style discrete block meter (`[████░░░░]`), not a continuous
+   bar — `appearance: none` strips WebKit's stock track/thumb chrome first
+   (default OS styling that ignores the app's dark theme, same problem the
+   scope picker's native <select> had), then a repeating-stripe mask cuts
+   the track into individual pixelated blocks with gaps between them. The
+   mask only controls which pixels are visible; the actual white/dim
+   coloring underneath is painted live by main.ts's `updateSliderFill` as
+   a two-stop gradient, same mechanism as before, just monochrome now
+   instead of the blue accent used elsewhere in the app. */
+.weight-slider {
+  flex-shrink: 0;
+  width: 152px;
+  height: 10px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+  cursor: pointer;
+  -webkit-mask-image: repeating-linear-gradient(to right, #000 0 4px, transparent 4px 6px);
+  mask-image: repeating-linear-gradient(to right, #000 0 4px, transparent 4px 6px);
+}
+
+.weight-slider::-webkit-slider-runnable-track {
+  height: 10px;
+  background: transparent;
+}
+
+/* No visible knob — the block-fill boundary itself is the position
+   indicator, the same way a CLI progress bar has no separate cursor. This
+   stays draggable (the whole input captures pointer events, not just the
+   thumb), it's just invisible rather than removed.  */
+.weight-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 6px;
+  height: 10px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.weight-value {
+  flex-shrink: 0;
+  width: 34px;
+  text-align: right;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-reset {
+  justify-content: center;
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.settings-reset:hover {
+  color: white;
 }
 
 /* The scope picker's own choices render inline in #results (see main.ts's

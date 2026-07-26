@@ -18,3 +18,7 @@ pub fn default_db_uri() -> String {
 pub fn default_watched_folders_path() -> PathBuf {
     default_app_data_dir().join("watched_folders.json")
 }
+
+pub fn default_settings_path() -> PathBuf {
+    default_app_data_dir().join("settings.json")
+}

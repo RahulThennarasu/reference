@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use reference_core::embedding::Embedder;
 use reference_core::paths;
-use reference_core::store::Store;
+use reference_core::store::{RankingWeights, Store};
 use reference_core::synthesize;
 use reference_core::watcher;
 use serde::Serialize;
@@ -29,6 +29,9 @@ struct AppState {
     // Each entry gets its own background watch thread; re-adding an
     // already-watched folder is a no-op instead of spawning a duplicate.
     watching: Mutex<HashMap<PathBuf, WatchHandle>>,
+    // Query-time only (see `RankingWeights`'s doc comment) — reading this
+    // under a lock on every search is cheap, no need for anything fancier.
+    ranking_weights: Mutex<RankingWeights>,
 }
 
 fn load_watched_folders() -> Vec<String> {
@@ -54,6 +57,18 @@ fn save_watched_folders(state: &AppState) {
         }
         Err(e) => eprintln!("failed to serialize watched folders: {e}"),
     }
+}
+
+fn load_ranking_weights() -> RankingWeights {
+    std::fs::read_to_string(paths::default_settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_ranking_weights(weights: &RankingWeights) -> Result<(), String> {
+    let json = serde_json::to_string(weights).map_err(|e| e.to_string())?;
+    std::fs::write(paths::default_settings_path(), json).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -147,6 +162,7 @@ async fn search(
         Vec::new()
     };
 
+    let weights = *state.ranking_weights.lock().map_err(|e| e.to_string())?;
     let embedding = state.embedder.embed(&query).map_err(|e| e.to_string())?;
     let hits = state
         .store
@@ -155,6 +171,7 @@ async fn search(
             &embedding,
             top_k.max(SYNTHESIS_CANDIDATE_POOL),
             folder.as_deref(),
+            &weights,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -398,6 +415,22 @@ fn list_watched(state: State<'_, AppState>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+fn get_ranking_weights(state: State<'_, AppState>) -> Result<RankingWeights, String> {
+    state.ranking_weights.lock().map(|w| *w).map_err(|e| e.to_string())
+}
+
+/// Persists `weights` to disk and applies them to every search from this
+/// point on. Query-time only (see `RankingWeights`'s doc comment in
+/// store.rs) — no index rebuild, no restart needed, unlike gap #3/#4's
+/// schema columns.
+#[tauri::command]
+fn set_ranking_weights(state: State<'_, AppState>, weights: RankingWeights) -> Result<(), String> {
+    save_ranking_weights(&weights)?;
+    *state.ranking_weights.lock().map_err(|e| e.to_string())? = weights;
+    Ok(())
+}
+
+#[tauri::command]
 fn home_dir() -> Result<String, String> {
     std::env::var("HOME").map_err(|e| e.to_string())
 }
@@ -476,6 +509,7 @@ pub fn run() {
         embedder: Arc::new(embedder),
         store: Arc::new(store),
         watching: Mutex::new(HashMap::new()),
+        ranking_weights: Mutex::new(load_ranking_weights()),
     };
 
     for folder in load_watched_folders() {
@@ -496,7 +530,9 @@ pub fn run() {
             stop_watch,
             list_watched,
             home_dir,
-            list_dir_suggestions
+            list_dir_suggestions,
+            get_ranking_weights,
+            set_ranking_weights
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
