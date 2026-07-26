@@ -1,6 +1,6 @@
 # code-aware chunking
 
-status: **phases 1-2 implemented** (rust, python, typescript/javascript). this is a scoping doc, not an implementation plan to follow blindly, expect it to change once real code proves parts of it wrong. go/others (phase 3) not started, no known need yet.
+status: **phases 1-3 implemented** (rust, python, typescript/javascript, go, java, c/c++). this is a scoping doc, not an implementation plan to follow blindly, expect it to change once real code proves parts of it wrong. other languages (ruby, etc.) not started, no known need yet.
 
 ## the problem
 
@@ -36,6 +36,9 @@ verified against docs.rs (per `CLAUDE.md`'s own rule, don't trust memory for fas
 | `tree-sitter-typescript` | 0.23.2 |
 | `tree-sitter-javascript` | 0.25.0 |
 | `tree-sitter-go` | 0.25.0 |
+| `tree-sitter-java` | 0.23.5 |
+| `tree-sitter-c` | 0.24.2 |
+| `tree-sitter-cpp` | 0.23.4 |
 
 core api surface confirmed present on docs.rs for `tree-sitter` 0.26.11: `Parser`, `Language`, `Tree`, `Node`, `Query`, `QueryCursor`. the actual chunk-extraction shape:
 
@@ -128,7 +131,9 @@ don't build all five languages at once. vertical-slice this the same way the res
 
 1. **rust only**, end-to-end: schema migration, watcher changes, delete-then-reinsert, search, ui, proven completely on this project's own codebase (`core/`, `app/src-tauri/`) before adding a second language. this project indexing itself is the natural first test case.
 2. add python and typescript/javascript next (covers `Orbis`'s stack, which has been the other real-world test corpus this whole session).
-3. go, or others, only if there's an actual need.
+3. **go — done.** `core/src/chunk.rs` dispatches `"go"` through `tree_sitter_go::LANGUAGE` with a query matching `function_declaration`, `method_declaration`, and `type_declaration`. go has no impl/class container: a method carries its own receiver (`func (t *Thing) Method() {...}`) and is declared top-level, never nested inside the type it's defined on, so `is_container_kind` doesn't need a go case and a struct/interface's `type_declaration` chunk and its methods both survive as separate chunks without the swallowing logic used for rust `impl`/python-JS-TS `class`. `type_declaration` chunks get `chunk_kind = "type"` (covers both struct and interface definitions, no need to split those further). covered by unit tests in `chunk.rs` (`go_functions_methods_and_types`, `go_interface_type_becomes_its_own_chunk`); this project has no `.go` source of its own to dogfood against, so end-to-end verification happened via the app against an external go file rather than this repo's own index.
+4. **java, c, c++ — done.** `core/src/chunk.rs` dispatches `"java"` through `tree_sitter_java::LANGUAGE`, `"c"`/`"h"` through `tree_sitter_c::LANGUAGE`, and `"cpp"`/`"cc"`/`"cxx"`/`"hpp"`/`"hh"`/`"hxx"` through `tree_sitter_cpp::LANGUAGE` (bare `.h` defaults to C — ambiguous with C++ headers, but the older/more common convention for that extension). Java's `class_declaration`/`interface_declaration` and C++'s `class_specifier`/`struct_specifier` get the same container-swallowing treatment as rust `impl`/python `class`, since methods nest inside them the same way. Java interfaces get one extra wrinkle: `method_declaration body: (block)` only matches methods that actually have a body, so an abstract method *signature* (the common case, no body) is never matched at all — an interface with only abstract methods stays one coherent "interface" chunk, same as TS, while an interface with default/static methods (which do have bodies) splits those out individually. C's `function_definition` node only exists for functions with a body, so a bare prototype (`int foo(int);`) is a different, unmatched node kind for free, no explicit `body:` constraint needed there. verified against the crates' own `node-types.json` (not docs.rs, which only covers the Rust API surface, not grammar node kinds) rather than assumed from memory, per `CLAUDE.md`'s verification rule. covered by unit tests in `chunk.rs`; end-to-end verified via the running app's search/synthesis UI against real `.java`/`.c`/`.cpp` scratch files.
+5. other languages (ruby, etc.), only if there's an actual need.
 
 every language added is: one new grammar dependency + one new `.scm` query file + a branch in the extension-to-language dispatch. the schema, watcher restructuring, stale-cleanup logic, and ui changes are all one-time costs paid once, in step 1.
 

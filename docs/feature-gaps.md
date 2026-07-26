@@ -6,7 +6,7 @@ the core mechanism works and is genuinely differentiated: local opt-in watching,
 
 ## 1. language coverage
 
-function-level chunking only covers rust, python, typescript, and javascript. everything else (go, java, c/c++, ruby, etc.) falls back to whole-file chunking, which is exactly the dilution problem chunking exists to solve in the first place (see `docs/code-aware-chunking.md`). most developers touch at least one language outside this list. of everything on this page, this is the single gap most likely to make a new user bounce off immediately, and it's already the explicitly planned next phase per that same doc's phased rollout.
+function-level chunking covers rust, python, typescript, javascript, go, java, c, and c++. ruby and everything else still falls back to whole-file chunking, which is exactly the dilution problem chunking exists to solve in the first place (see `docs/code-aware-chunking.md`). most developers touch at least one language outside the original four. of everything on this page, this was the single gap most likely to make a new user bounce off immediately; the languages added this pass cover the large majority of that traffic, the rest are lower-traffic languages to pick up only as real need shows up.
 
 ## 2. no folder scoping in the app itself
 

@@ -38,6 +38,15 @@ pub fn chunk_source(extension: &str, source: &str) -> Option<Vec<Chunk>> {
             source,
         ),
         "tsx" => chunk_with(tree_sitter_typescript::LANGUAGE_TSX.into(), TS_QUERY_SRC, source),
+        "go" => chunk_with(tree_sitter_go::LANGUAGE.into(), GO_QUERY_SRC, source),
+        "java" => chunk_with(tree_sitter_java::LANGUAGE.into(), JAVA_QUERY_SRC, source),
+        // ".h" is ambiguous between C and C++; default to C, the older and
+        // more common convention for that bare extension. C++ headers
+        // typically use one of the extensions below instead.
+        "c" | "h" => chunk_with(tree_sitter_c::LANGUAGE.into(), C_QUERY_SRC, source),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => {
+            chunk_with(tree_sitter_cpp::LANGUAGE.into(), CPP_QUERY_SRC, source)
+        }
         _ => None,
     }
 }
@@ -77,23 +86,85 @@ const TS_QUERY_SRC: &str = "
 (lexical_declaration (variable_declarator value: (function_expression))) @item
 ";
 
+// Go has no impl/class container: methods are top-level `method_declaration`
+// nodes carrying their own receiver (`func (t *Thing) Method() {...}`), never
+// nested inside the type they're defined on. `type_declaration` covers
+// struct/interface type definitions, which stay meaningful chunks on their
+// own (analogous to `interface_declaration` in TS) since methods never
+// nest inside them.
+const GO_QUERY_SRC: &str = "
+(function_declaration) @item
+(method_declaration) @item
+(type_declaration) @item
+";
+
+// Java: `method_declaration`/`constructor_declaration` inside a class or
+// interface body are matched the same way rust/python/js methods inside an
+// impl/class are — the `body: (block)` constraint on `method_declaration`
+// excludes abstract interface method *signatures* (no body), so an
+// interface with only abstract methods still collapses to one meaningful
+// "interface" chunk instead of a pile of one-line signature fragments.
+const JAVA_QUERY_SRC: &str = "
+(class_declaration) @item
+(interface_declaration) @item
+(enum_declaration) @item
+(method_declaration body: (block)) @item
+(constructor_declaration) @item
+";
+
+// C: `function_definition` is only the node for a function with a body —
+// a bare prototype (`int foo(int);`) is a different node kind and never
+// matched, same effect as Java's `body:` constraint above but the grammar
+// already gives us that split for free.
+const C_QUERY_SRC: &str = "
+(function_definition) @item
+(struct_specifier) @item
+";
+
+// C++: same `function_definition` shape as C, but member functions defined
+// inline inside a class/struct body are also `function_definition` nodes,
+// so `class_specifier`/`struct_specifier` need container treatment (see
+// `is_container_kind`) the way rust `impl`/python `class` already get it.
+const CPP_QUERY_SRC: &str = "
+(function_definition) @item
+(class_specifier) @item
+(struct_specifier) @item
+";
+
 fn kind_of(node_kind: &str) -> &'static str {
     match node_kind {
         "impl_item" => "impl",
-        "class_definition" | "class_declaration" => "class",
+        "class_definition" | "class_declaration" | "class_specifier" => "class",
         "interface_declaration" => "interface",
+        "type_declaration" => "type",
+        "enum_declaration" => "enum",
+        "struct_specifier" => "struct",
         _ => "function",
     }
 }
 
-// `impl`/`class` blocks are containers: when they have methods inside, the
-// methods should be the chunks, not one blob covering the whole container.
-// `interface_declaration` isn't included here even though it's structurally
-// similar, because our queries never match anything nested inside one (a
-// TS interface's members are type signatures, not functions/classes), so it
-// always stays a single meaningful chunk on its own.
+// `impl`/`class`/`struct` blocks are containers: when they have methods
+// inside, the methods should be the chunks, not one blob covering the whole
+// container. `interface_declaration` is included too (see the comment on
+// that arm below) even though for TS specifically it never actually
+// triggers — a TS interface's members are type signatures, not matched
+// nodes, so it always stays a single meaningful chunk on its own regardless.
 fn is_container_kind(node_kind: &str) -> bool {
-    matches!(node_kind, "impl_item" | "class_definition" | "class_declaration")
+    matches!(
+        node_kind,
+        "impl_item"
+            | "class_definition"
+            | "class_declaration"
+            | "class_specifier"
+            | "struct_specifier"
+            // Safe to include unconditionally: TS's `interface_declaration`
+            // members are type/method *signatures*, never matched nodes, so
+            // this never actually triggers for TS (see the TS query above).
+            // Java's is different: default/static interface methods do have
+            // a body and get matched, so this correctly swallows those into
+            // individual chunks the same way a class's methods do.
+            | "interface_declaration"
+    )
 }
 
 fn chunk_with(language: Language, query_src: &str, source: &str) -> Option<Vec<Chunk>> {
@@ -278,7 +349,7 @@ fn outer() -> i32 {
 
     #[test]
     fn unsupported_extension_returns_none() {
-        assert!(chunk_source("go", "func f() {}").is_none());
+        assert!(chunk_source("rb", "def f; end").is_none());
     }
 
     #[test]
@@ -288,7 +359,7 @@ fn outer() -> i32 {
 
     #[test]
     fn chunk_or_whole_file_falls_back_for_unsupported_language() {
-        let chunks = chunk_or_whole_file("go", "func f() {}\n");
+        let chunks = chunk_or_whole_file("rb", "def f; end\n");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].kind, "file");
     }
@@ -373,5 +444,205 @@ function greet(user: User): string {
         assert_eq!(kinds, vec!["interface", "function"]);
         assert!(chunks[0].content.contains("interface User"));
         assert!(chunks[1].content.contains("function greet"));
+    }
+
+    #[test]
+    fn go_functions_methods_and_types() {
+        let source = r#"
+package main
+
+import "fmt"
+
+type Thing struct {
+    Name string
+}
+
+func (t *Thing) Greet() string {
+    return "hi " + t.Name
+}
+
+func freeFunction(x int) int {
+    return x + 1
+}
+"#;
+        let chunks = chunk_source("go", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // Go methods carry their own receiver and are never nested inside
+        // the type they're defined on, so the struct's `type` chunk and its
+        // method both survive as separate chunks (unlike impl/class, there's
+        // no container to swallow the method into).
+        assert_eq!(kinds, vec!["file", "type", "function", "function"]);
+
+        assert!(chunks[0].content.contains(r#"import "fmt""#));
+
+        let type_chunk = &chunks[1];
+        assert!(type_chunk.content.contains("type Thing struct"));
+        assert!(!type_chunk.content.contains("func"));
+
+        let method = &chunks[2];
+        assert!(method.content.contains("func (t *Thing) Greet"));
+
+        let free_fn = &chunks[3];
+        assert!(free_fn.content.contains("func freeFunction"));
+    }
+
+    #[test]
+    fn go_interface_type_becomes_its_own_chunk() {
+        let source = r#"
+package main
+
+type Greeter interface {
+    Greet() string
+}
+
+func UseGreeter(g Greeter) string {
+    return g.Greet()
+}
+"#;
+        let chunks = chunk_source("go", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // "package main" itself becomes the preamble "file" chunk, same as
+        // imports/consts before the first matched node in the other tests.
+        assert_eq!(kinds, vec!["file", "type", "function"]);
+        assert!(chunks[0].content.contains("package main"));
+        assert!(chunks[1].content.contains("type Greeter interface"));
+        assert!(chunks[2].content.contains("func UseGreeter"));
+    }
+
+    #[test]
+    fn java_methods_inside_a_class_become_individual_chunks() {
+        let source = r#"
+import java.util.List;
+
+class Thing {
+    Thing() {
+        System.out.println("built");
+    }
+
+    int methodOne() {
+        return 1;
+    }
+
+    int methodTwo() {
+        return 2;
+    }
+}
+"#;
+        let chunks = chunk_source("java", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // no "class" chunk: Thing had matched constructor/method children,
+        // same swallowing behavior as rust impl / python class.
+        assert_eq!(kinds, vec!["file", "function", "function", "function"]);
+
+        assert!(chunks[0].content.contains("import java.util.List"));
+        assert!(chunks[1].content.contains("Thing()"));
+        assert!(chunks[2].content.contains("methodOne"));
+        assert!(!chunks[2].content.contains("methodTwo"));
+        assert!(chunks[3].content.contains("methodTwo"));
+    }
+
+    #[test]
+    fn java_abstract_interface_stays_one_chunk_but_default_methods_split_out() {
+        let source = r#"
+interface Greeter {
+    String greet();
+
+    default String shout() {
+        return greet().toUpperCase();
+    }
+}
+"#;
+        let chunks = chunk_source("java", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // the abstract `greet()` signature has no body so it's never matched
+        // at all; the interface has one matched child (`shout`, which does
+        // have a body), so the interface container gets swallowed just like
+        // a class with methods would.
+        assert_eq!(kinds, vec!["function"]);
+        assert!(chunks[0].content.contains("shout"));
+        assert!(!chunks[0].content.contains("interface Greeter"));
+    }
+
+    #[test]
+    fn java_interface_with_no_default_methods_is_kept_whole() {
+        let source = r#"
+interface Greeter {
+    String greet();
+}
+"#;
+        let chunks = chunk_source("java", source).expect("should produce chunks");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, "interface");
+        assert!(chunks[0].content.contains("String greet()"));
+    }
+
+    #[test]
+    fn c_functions_and_structs() {
+        let source = r#"
+#include <stdio.h>
+
+struct Point {
+    int x;
+    int y;
+};
+
+int add(int a, int b) {
+    return a + b;
+}
+
+int square(int x);
+"#;
+        let chunks = chunk_source("c", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // `square`'s prototype has no body, so it's a `declaration` node,
+        // never matched — only the two real definitions show up.
+        assert_eq!(kinds, vec!["file", "struct", "function"]);
+
+        assert!(chunks[0].content.contains("#include <stdio.h>"));
+        assert!(chunks[1].content.contains("struct Point"));
+        assert!(chunks[2].content.contains("int add"));
+        assert!(!chunks[2].content.contains("square"));
+    }
+
+    #[test]
+    fn cpp_methods_inside_a_class_become_individual_chunks() {
+        let source = r#"
+#include <string>
+
+class Thing {
+public:
+    int methodOne() {
+        return 1;
+    }
+
+    int methodTwo() {
+        return 2;
+    }
+};
+
+int freeFunction(int x) {
+    return x + 1;
+}
+"#;
+        let chunks = chunk_source("cpp", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // no "class" chunk: Thing had matched method children, methods
+        // become individually meaningful chunks instead of one blob,
+        // same swallowing behavior as rust impl / python class.
+        assert_eq!(kinds, vec!["file", "function", "function", "function"]);
+
+        assert!(chunks[0].content.contains("#include <string>"));
+        assert!(chunks[1].content.contains("methodOne"));
+        assert!(!chunks[1].content.contains("methodTwo"));
+        assert!(chunks[2].content.contains("methodTwo"));
+        assert!(chunks[3].content.contains("freeFunction"));
+    }
+
+    #[test]
+    fn cpp_struct_with_no_matched_children_is_kept_whole() {
+        let source = "struct Point {\n    int x;\n    int y;\n};\n";
+        let chunks = chunk_source("cpp", source).expect("should produce chunks");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, "struct");
     }
 }
