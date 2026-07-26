@@ -18,15 +18,27 @@ use crate::synthesize::is_question;
 
 const TABLE_NAME: &str = "files";
 
-// Hybrid ranking blends a semantic similarity score (embedding cosine
-// similarity, since stored/query embeddings are already L2-normalized) with
-// a fuzzy filename match score, so a literal/typo'd filename match can
-// surface a file even when its embedding similarity is mediocre.
-const SEMANTIC_WEIGHT: f32 = 0.65;
-const FUZZY_WEIGHT: f32 = 0.35;
+// Hybrid ranking blends three signals: semantic similarity (embedding cosine,
+// since stored/query embeddings are already L2-normalized), a fuzzy filename
+// match (so a literal/typo'd filename match can surface a file even when its
+// embedding similarity is mediocre), and literal term overlap against the
+// chunk's own body text (embedding similarity alone can rank a chunk that
+// merely discusses a similar topic above one that verbatim contains the
+// words the query used — this catches that case without needing an extra
+// model). Weights are re-split (not just fuzzy zeroed) for question-shaped
+// queries, per the same reasoning as `is_question` below: filename fuzzy
+// matching stops making sense against a full sentence, but content overlap
+// still does, so its share of the total stays fixed across both branches.
+const SEMANTIC_WEIGHT: f32 = 0.55;
+const FUZZY_WEIGHT: f32 = 0.30;
+const CONTENT_MATCH_WEIGHT: f32 = 0.15;
 // Soft-normalizes fuzzy-matcher's unbounded integer score into [0, 1):
 // score / (score + K), so it saturates smoothly instead of clipping.
 const FUZZY_SATURATION: f32 = 50.0;
+// Query tokens shorter than this are dropped before content-overlap scoring
+// — short words ("a", "is", "to") are too common to be a meaningful signal
+// and would inflate overlap fraction for nearly any chunk.
+const CONTENT_MATCH_MIN_TOKEN_LEN: usize = 3;
 
 pub struct HybridHit {
     pub path: String,
@@ -186,7 +198,12 @@ impl Store {
         // whether to answer at all) skip the fuzzy component entirely and
         // rank on semantic similarity alone.
         let fuzzy_weight = if is_question(query_text) { 0.0 } else { FUZZY_WEIGHT };
-        let semantic_weight = if is_question(query_text) { 1.0 } else { SEMANTIC_WEIGHT };
+        let semantic_weight = if is_question(query_text) {
+            SEMANTIC_WEIGHT + FUZZY_WEIGHT
+        } else {
+            SEMANTIC_WEIGHT
+        };
+        let query_terms = content_match_terms(query_text);
 
         for batch in &batches {
             let paths = batch
@@ -233,7 +250,11 @@ impl Store {
                     fuzzy_raw / (fuzzy_raw + FUZZY_SATURATION)
                 };
 
-                let score = semantic_weight * semantic_sim + fuzzy_weight * fuzzy_sim;
+                let content_match_sim = content_match_score(&query_terms, &content);
+
+                let score = semantic_weight * semantic_sim
+                    + fuzzy_weight * fuzzy_sim
+                    + CONTENT_MATCH_WEIGHT * content_match_sim;
                 hits.push(HybridHit {
                     path,
                     content,
@@ -272,4 +293,35 @@ impl Store {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Lowercased, deduplicated query words worth checking for literal presence
+/// in a chunk's content — short/common tokens are dropped since they'd match
+/// almost any chunk and add noise rather than signal.
+fn content_match_terms(query_text: &str) -> Vec<String> {
+    let mut terms: Vec<String> = query_text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() >= CONTENT_MATCH_MIN_TOKEN_LEN)
+        .map(|s| s.to_string())
+        .collect();
+    terms.sort_unstable();
+    terms.dedup();
+    terms
+}
+
+/// Fraction of `query_terms` that appear literally (case-insensitive) in
+/// `content` — a lightweight complement to embedding similarity, which can
+/// rank a chunk that merely discusses a similar topic above one that
+/// verbatim contains the words actually searched for.
+fn content_match_score(query_terms: &[String], content: &str) -> f32 {
+    if query_terms.is_empty() {
+        return 0.0;
+    }
+    let content_lower = content.to_lowercase();
+    let matched = query_terms
+        .iter()
+        .filter(|t| content_lower.contains(t.as_str()))
+        .count();
+    matched as f32 / query_terms.len() as f32
 }

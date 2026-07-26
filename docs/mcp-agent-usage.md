@@ -45,14 +45,16 @@ Output (JSON text content):
 ```json
 {
   "results": [
-    { "path": "/abs/path/to/file.rs", "start_line": 154, "end_line": 251, "chunk_kind": "function", "score": 0.61 }
+    { "path": "/abs/path/to/file.rs", "start_line": 154, "end_line": 251, "chunk_kind": "function", "score": 0.61, "content": "pub async fn hybrid_search(...) { ... }" }
   ],
   "citations": [
     { "path": "/abs/path/to/file.rs", "snippet": "pub async fn hybrid_search(...) { ... }", "start_line": 154, "end_line": 251, "chunk_kind": "function" }
   ]
 }
 ```
-Same shape the old CLI's `--json` mode produced. `citations` is only populated when the query reads as a question (`synthesize::is_question`) — see `docs/code-aware-chunking.md` for what `chunk_kind` values mean and how citation snippets are chosen.
+Broadly the same shape the old CLI's `--json` mode produced, with one addition: every `results` entry now includes the chunk's full `content` too, not just a file:line pointer — `hybrid_search` already has it in hand, and an MCP caller (an agent) almost always needs the actual text next, so returning it here saves a follow-up file read on every search, question-shaped or not. `citations` is still only populated when the query reads as a question (`synthesize::is_question`) — see `docs/code-aware-chunking.md` for what `chunk_kind` values mean and how citation snippets are chosen.
+
+Ranking itself blends three signals, not two: semantic similarity, fuzzy filename match, and literal term overlap against the chunk's own content (a lightweight complement to embeddings — catches a chunk that verbatim contains the words searched for, even if its embedding similarity is only middling because it also covers other things). Fuzzy filename matching still drops to zero weight for question-shaped queries (see `core/src/store.rs`'s `hybrid_search` for the exact weights); content-term overlap applies to both query shapes.
 
 ## `/refsearch` — explicit invocation
 

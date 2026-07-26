@@ -23,6 +23,13 @@ use reference_core::paths;
 use reference_core::store::Store;
 use reference_core::synthesize;
 
+// Mirrors the Tauri app's `SYNTHESIS_CANDIDATE_POOL` (app/src-tauri/src/lib.rs):
+// `synthesize()` needs a wider candidate pool to pick citations from than
+// whatever small `top_k` the caller asked for, otherwise a low `top_k` (the
+// MCP default is 5) starves it down to exactly the results already shown,
+// same failure mode the app avoids by expanding its own search pool first.
+const SYNTHESIS_CANDIDATE_POOL: usize = 50;
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchParams {
     /// Natural language query describing behavior or intent, not a grep
@@ -39,6 +46,11 @@ struct JsonHit {
     end_line: i32,
     chunk_kind: String,
     score: f32,
+    // `hybrid_search` already has this in hand; an MCP caller is an agent
+    // that almost always needs the actual text next, not just a pointer to
+    // it, unlike the app's UI where a human just clicks through. Returning
+    // it here saves a follow-up Read call on every single search.
+    content: String,
 }
 
 #[derive(Serialize)]
@@ -89,7 +101,7 @@ impl ReferenceServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let hits = self
             .store
-            .hybrid_search(&query, &embedding, k)
+            .hybrid_search(&query, &embedding, k.max(SYNTHESIS_CANDIDATE_POOL))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -102,12 +114,14 @@ impl ReferenceServer {
 
         let results: Vec<JsonHit> = hits
             .iter()
+            .take(k)
             .map(|h| JsonHit {
                 path: h.path.clone(),
                 start_line: h.start_line,
                 end_line: h.end_line,
                 chunk_kind: h.chunk_kind.clone(),
                 score: h.score,
+                content: h.content.clone(),
             })
             .collect();
         let citations: Vec<JsonCitation> = citations
