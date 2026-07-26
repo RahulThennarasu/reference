@@ -70,6 +70,7 @@ async fn index_file(embedder: &Embedder, store: &Store, path: &Path) -> Result<(
             kind: c.kind,
             content: c.content,
             embedding,
+            name: c.name.unwrap_or_default(),
         })
         .collect();
 

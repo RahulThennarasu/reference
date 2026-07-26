@@ -124,6 +124,25 @@ body {
   white-space: normal;
 }
 
+/* Marks a result from exact-symbol lookup (Store::find_by_name), not the
+   fuzzy/semantic ranking. Plain colored text, not a pill — same monospace
+   stack as the code blocks (`.code-block code`) and a brighter, more
+   saturated blue than the standard `#2f83fc` accent (closer to
+   `.hljs-title.function_`'s territory but punchier), so it reads like a
+   syntax-highlighted token rather than a UI chrome element. Sits before
+   the send button, after the path, so it's a qualifier on the row rather
+   than competing with the filename for attention. */
+.exact-match-badge {
+  flex-shrink: 0;
+  margin-left: 8px;
+  color: #4da3ff;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .answer {
   position: relative;
   padding: 6px 34px 6px 12px;

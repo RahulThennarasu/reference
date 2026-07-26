@@ -10,6 +10,15 @@ pub struct Chunk {
     pub end_line: i32,
     pub kind: String,
     pub content: String,
+    // The chunk's own identifier (function/method/class/... name), when one
+    // exists — `None` for preamble/whole-file chunks and any matched node
+    // whose grammar doesn't expose a name in a shape `extract_name`
+    // recognizes (e.g. an `impl` block, which names a type, not itself).
+    // This is what powers exact-match symbol lookup (see `store.rs`'s
+    // `name` column): fuzzy/semantic search alone can't guarantee "this is
+    // literally the function called `validate_jwt`", only "this looks
+    // related".
+    pub name: Option<String>,
 }
 
 fn whole_file_chunk(source: &str) -> Chunk {
@@ -18,6 +27,7 @@ fn whole_file_chunk(source: &str) -> Chunk {
         end_line: source.lines().count().max(1) as i32,
         kind: "file".to_string(),
         content: source.to_string(),
+        name: None,
     }
 }
 
@@ -167,6 +177,49 @@ fn is_container_kind(node_kind: &str) -> bool {
     )
 }
 
+// Pulls the identifier a matched node is named after, when the grammar
+// exposes one. Three shapes, tried in order:
+// 1. a direct `name` field — covers the common case across every grammar
+//    here (rust `function_item`, python `function_definition`/
+//    `class_definition`, java/js/ts declarations, go's `type_declaration`
+//    when the field happens to sit directly on it, C/C++'s
+//    `struct_specifier`/`class_specifier`).
+// 2. one level down, on a named child — covers wrapper nodes where the
+//    real name lives one level in: JS/TS `(lexical_declaration
+//    (variable_declarator value: (arrow_function)))` (the query captures
+//    the outer `lexical_declaration`, but the name is the inner
+//    `variable_declarator`'s), and go's `type_declaration` (wraps a
+//    `type_spec`, which is what actually carries the name).
+// 3. following a `declarator` field chain down to a plain identifier —
+//    C/C++ function names aren't exposed via a `name` field at all, they're
+//    buried inside nested `declarator`s (`int *foo(...)` is
+//    `function_declarator { declarator: pointer_declarator { declarator:
+//    identifier } }`), so this walks that chain instead.
+fn extract_name(node: Node, source: &str) -> Option<String> {
+    let text_of = |n: Node| source[n.start_byte()..n.end_byte()].to_string();
+
+    if let Some(n) = node.child_by_field_name("name") {
+        return Some(text_of(n));
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(n) = child.child_by_field_name("name") {
+            return Some(text_of(n));
+        }
+    }
+
+    let mut declarator = node.child_by_field_name("declarator");
+    while let Some(n) = declarator {
+        if matches!(n.kind(), "identifier" | "field_identifier") {
+            return Some(text_of(n));
+        }
+        declarator = n.child_by_field_name("declarator");
+    }
+
+    None
+}
+
 fn chunk_with(language: Language, query_src: &str, source: &str) -> Option<Vec<Chunk>> {
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
@@ -240,6 +293,7 @@ fn chunk_with(language: Language, query_src: &str, source: &str) -> Option<Vec<C
                 end_line: preamble.matches('\n').count() as i32 + 1,
                 kind: "file".to_string(),
                 content: preamble.trim().to_string(),
+                name: None,
             });
         }
     }
@@ -250,6 +304,17 @@ fn chunk_with(language: Language, query_src: &str, source: &str) -> Option<Vec<C
             end_line: node.end_position().row as i32 + 1,
             kind: kind_of(node.kind()).to_string(),
             content: source[node.start_byte()..node.end_byte()].to_string(),
+            // `impl_item` is special-cased out rather than left to the
+            // generic fallback: its named children include the trait being
+            // implemented (`impl Debug for Thing`), which itself often
+            // exposes a `name` field ("Debug") — the fallback would
+            // mistake that for the impl block's own name, which is
+            // actively misleading for exact-match lookup, not just absent.
+            name: if node.kind() == "impl_item" {
+                None
+            } else {
+                extract_name(node, source)
+            },
         });
     }
 
@@ -557,10 +622,15 @@ interface Greeter {
         // the abstract `greet()` signature has no body so it's never matched
         // at all; the interface has one matched child (`shout`, which does
         // have a body), so the interface container gets swallowed just like
-        // a class with methods would.
-        assert_eq!(kinds, vec!["function"]);
-        assert!(chunks[0].content.contains("shout"));
-        assert!(!chunks[0].content.contains("interface Greeter"));
+        // a class with methods would. everything before the surviving
+        // `shout` chunk — the interface opener plus the abstract `greet()`
+        // signature — falls out as the leading "file" preamble chunk, same
+        // mechanism as imports/consts before a first function elsewhere.
+        assert_eq!(kinds, vec!["file", "function"]);
+        assert!(chunks[0].content.contains("interface Greeter"));
+        assert!(chunks[0].content.contains("String greet()"));
+        assert!(chunks[1].content.contains("shout"));
+        assert!(!chunks[1].content.contains("interface Greeter"));
     }
 
     #[test]
@@ -644,5 +714,42 @@ int freeFunction(int x) {
         let chunks = chunk_source("cpp", source).expect("should produce chunks");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].kind, "struct");
+    }
+
+    #[test]
+    fn rust_function_and_impl_names() {
+        let source = "fn free_function(x: i32) -> i32 {\n    x\n}\n\nimpl std::fmt::Debug for Thing {}\n";
+        let chunks = chunk_source("rs", source).expect("should produce chunks");
+        assert_eq!(chunks[0].name.as_deref(), Some("free_function"));
+        // impl blocks name a type, not themselves — extract_name finds
+        // nothing meaningful to call this chunk by, so it's None rather
+        // than a misleading guess.
+        assert_eq!(chunks[1].name, None);
+    }
+
+    #[test]
+    fn js_arrow_const_name_comes_from_the_inner_declarator() {
+        let source = "const arrowFn = () => {\n    return 2;\n};\n";
+        let chunks = chunk_source("js", source).expect("should produce chunks");
+        assert_eq!(chunks[0].name.as_deref(), Some("arrowFn"));
+    }
+
+    #[test]
+    fn go_type_name_comes_from_the_inner_type_spec() {
+        let source = "package main\n\ntype Greeter interface {\n    Greet() string\n}\n";
+        let chunks = chunk_source("go", source).expect("should produce chunks");
+        let type_chunk = chunks.iter().find(|c| c.kind == "type").unwrap();
+        assert_eq!(type_chunk.name.as_deref(), Some("Greeter"));
+    }
+
+    #[test]
+    fn c_function_name_follows_the_declarator_chain() {
+        // a pointer return type means the identifier is nested inside a
+        // pointer_declarator, not exposed as a direct `name` field —
+        // exactly the case extract_name's declarator-chain fallback exists
+        // for.
+        let source = "int *make_thing(int x) {\n    return 0;\n}\n";
+        let chunks = chunk_source("c", source).expect("should produce chunks");
+        assert_eq!(chunks[0].name.as_deref(), Some("make_thing"));
     }
 }

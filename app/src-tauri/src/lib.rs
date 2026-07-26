@@ -63,6 +63,11 @@ struct SearchResult {
     start_line: usize,
     end_line: usize,
     chunk_kind: String,
+    // True when this row came from the exact-symbol lookup (see
+    // `looks_like_identifier`/`Store::find_by_name`), not the fuzzy/semantic
+    // ranking — the UI badges these differently, since "this is literally
+    // the thing you named" is a stronger claim than "this looks relevant".
+    exact_match: bool,
 }
 
 #[derive(Serialize)]
@@ -91,6 +96,23 @@ struct SearchResponse {
 // table before truncating, so asking for more rows here costs nothing extra.
 const SYNTHESIS_CANDIDATE_POOL: usize = 50;
 
+// A query is treated as "looking for this exact symbol" only when it's a
+// single bare identifier — a shape a natural-language question or a
+// multi-word filename-ish query never takes. Deliberately conservative:
+// this gates a literal `name = '<query>'` lookup (see
+// `Store::find_by_name`), so a false positive here wouldn't just rank
+// something oddly, it would silently skip exact matching for a query that
+// actually named a symbol (e.g. one with a leading digit, which is not a
+// valid identifier in any of the supported languages anyway).
+fn looks_like_identifier(query: &str) -> bool {
+    let mut chars = query.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[tauri::command]
 async fn search(
     state: State<'_, AppState>,
@@ -102,6 +124,22 @@ async fn search(
     // "search everything" mean the same thing, so there's nothing to pick.
     folder: Option<String>,
 ) -> Result<SearchResponse, String> {
+    // Exact-symbol lookup (gap: no IDE-style "find this exact function by
+    // name" path — fuzzy/semantic/content-overlap ranking can't guarantee
+    // literal identity). Deliberately app-only: the MCP `search` tool skips
+    // this on purpose, since an agent already has grep for exact lookups
+    // (see CLAUDE.md/feature-gaps.md's gap #3) — this exists for the human
+    // in the desktop search palette who expects go-to-definition behavior.
+    let exact_hits = if looks_like_identifier(&query) {
+        state
+            .store
+            .find_by_name(&query, folder.as_deref())
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+
     let embedding = state.embedder.embed(&query).map_err(|e| e.to_string())?;
     let hits = state
         .store
@@ -130,16 +168,35 @@ async fn search(
         Vec::new()
     };
 
-    let results = hits
+    // Exact matches lead, since they're a stronger claim than anything
+    // ranked — then whatever hybrid_search found, skipping rows exact
+    // lookup already surfaced (same path + line range) so nothing repeats.
+    let exact_keys: std::collections::HashSet<(String, i32)> =
+        exact_hits.iter().map(|h| (h.path.clone(), h.start_line)).collect();
+
+    let results = exact_hits
         .into_iter()
-        .take(top_k)
         .map(|h| SearchResult {
             path: h.path,
             score: h.score,
             start_line: h.start_line as usize,
             end_line: h.end_line as usize,
             chunk_kind: h.chunk_kind,
+            exact_match: true,
         })
+        .chain(
+            hits.into_iter()
+                .filter(|h| !exact_keys.contains(&(h.path.clone(), h.start_line)))
+                .map(|h| SearchResult {
+                    path: h.path,
+                    score: h.score,
+                    start_line: h.start_line as usize,
+                    end_line: h.end_line as usize,
+                    chunk_kind: h.chunk_kind,
+                    exact_match: false,
+                }),
+        )
+        .take(top_k)
         .collect();
 
     Ok(SearchResponse { results, citations })

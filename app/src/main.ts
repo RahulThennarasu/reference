@@ -98,6 +98,7 @@ interface SearchResult {
   start_line: number;
   end_line: number;
   chunk_kind: string;
+  exact_match: boolean;
 }
 
 interface Citation {
@@ -551,6 +552,15 @@ function renderResponse(response: SearchResponse, query: string) {
     li.appendChild(iconImg(fileIconUrl(r.path)));
     li.appendChild(name);
     li.appendChild(path);
+
+    if (r.exact_match) {
+      const badge = document.createElement("span");
+      badge.className = "exact-match-badge";
+      badge.textContent = "exact";
+      badge.title = "exact symbol match";
+      li.appendChild(badge);
+    }
+
     li.appendChild(
       sendButton(async (btn) => {
         let content = "";

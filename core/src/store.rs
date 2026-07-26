@@ -47,16 +47,22 @@ pub struct HybridHit {
     pub start_line: i32,
     pub end_line: i32,
     pub chunk_kind: String,
+    pub name: String,
 }
 
 /// One chunk of a file (a function, an impl block, or the whole file as a
-/// fallback), already embedded and ready to write.
+/// fallback), already embedded and ready to write. `name` is the chunk's own
+/// identifier when `chunk::extract_name` found one (empty string otherwise —
+/// stored as a plain, non-nullable column like every other field here rather
+/// than `Option`, matching this schema's existing convention), and is what
+/// `Store::find_by_name` matches on for exact-symbol lookup.
 pub struct ChunkRecord {
     pub start_line: i32,
     pub end_line: i32,
     pub kind: String,
     pub content: String,
     pub embedding: Vec<f32>,
+    pub name: String,
 }
 
 pub struct Store {
@@ -70,6 +76,7 @@ fn schema() -> SchemaRef {
         Field::new("end_line", DataType::Int32, false),
         Field::new("chunk_kind", DataType::Utf8, false),
         Field::new("content", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
         Field::new(
             "embedding",
             DataType::FixedSizeList(
@@ -119,6 +126,7 @@ impl Store {
         let mut end_lines = Vec::with_capacity(n);
         let mut kinds = Vec::with_capacity(n);
         let mut contents = Vec::with_capacity(n);
+        let mut names = Vec::with_capacity(n);
         let mut embeddings = Vec::with_capacity(n);
         for c in chunks {
             paths.push(path.to_string());
@@ -126,6 +134,7 @@ impl Store {
             end_lines.push(c.end_line);
             kinds.push(c.kind);
             contents.push(c.content);
+            names.push(c.name);
             embeddings.push(Some(c.embedding.into_iter().map(Some).collect::<Vec<_>>()));
         }
 
@@ -137,6 +146,7 @@ impl Store {
                 Arc::new(Int32Array::from(end_lines)),
                 Arc::new(StringArray::from(kinds)),
                 Arc::new(StringArray::from(contents)),
+                Arc::new(StringArray::from(names)),
                 Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
                     embeddings,
                     EMBEDDING_DIM as i32,
@@ -185,6 +195,7 @@ impl Store {
             "end_line".to_string(),
             "chunk_kind".to_string(),
             "content".to_string(),
+            "name".to_string(),
             "embedding".to_string(),
         ]));
         if let Some(folder) = folder {
@@ -234,6 +245,10 @@ impl Store {
                 .column_by_name("content")
                 .context("missing content column")?
                 .as_string::<i32>();
+            let names = batch
+                .column_by_name("name")
+                .context("missing name column")?
+                .as_string::<i32>();
             let embeddings = batch
                 .column_by_name("embedding")
                 .context("missing embedding column")?
@@ -270,12 +285,85 @@ impl Store {
                     start_line: start_lines.value(i),
                     end_line: end_lines.value(i),
                     chunk_kind: chunk_kinds.value(i).to_string(),
+                    name: names.value(i).to_string(),
                 });
             }
         }
 
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(k);
+        Ok(hits)
+    }
+
+    /// Exact, case-sensitive lookup by a chunk's own identifier (function,
+    /// method, class, ... name — see `chunk::extract_name`) — the "find this
+    /// exact function by name" path `hybrid_search`'s fuzzy/semantic/overlap
+    /// blend can't guarantee on its own, since it always ranks by
+    /// similarity, never by literal identity. An equality filter pushed down
+    /// via `only_if` rather than a table scan, so this stays fast regardless
+    /// of index size — no embedding or per-row scoring involved. Every hit
+    /// gets `score = 1.0`: there's no ranking question once a match is
+    /// exact, they're all equally "the thing you asked for" (e.g. same
+    /// method name implemented on several types).
+    pub async fn find_by_name(&self, name: &str, folder: Option<&str>) -> Result<Vec<HybridHit>> {
+        let escaped = name.replace('\'', "''");
+        let mut predicate = format!("name = '{escaped}'");
+        if let Some(folder) = folder {
+            let folder = folder.trim_end_matches('/').replace('\'', "''");
+            predicate = format!("{predicate} AND path LIKE '{folder}/%'");
+        }
+
+        let batches = self
+            .table
+            .query()
+            .select(Select::Columns(vec![
+                "path".to_string(),
+                "start_line".to_string(),
+                "end_line".to_string(),
+                "chunk_kind".to_string(),
+                "content".to_string(),
+                "name".to_string(),
+            ]))
+            .only_if(predicate)
+            .execute()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let mut hits = Vec::new();
+        for batch in &batches {
+            let paths = batch.column_by_name("path").context("missing path column")?.as_string::<i32>();
+            let start_lines = batch
+                .column_by_name("start_line")
+                .context("missing start_line column")?
+                .as_primitive::<arrow_array::types::Int32Type>();
+            let end_lines = batch
+                .column_by_name("end_line")
+                .context("missing end_line column")?
+                .as_primitive::<arrow_array::types::Int32Type>();
+            let chunk_kinds = batch
+                .column_by_name("chunk_kind")
+                .context("missing chunk_kind column")?
+                .as_string::<i32>();
+            let contents = batch
+                .column_by_name("content")
+                .context("missing content column")?
+                .as_string::<i32>();
+            let names = batch.column_by_name("name").context("missing name column")?.as_string::<i32>();
+
+            for i in 0..batch.num_rows() {
+                hits.push(HybridHit {
+                    path: paths.value(i).to_string(),
+                    content: contents.value(i).to_string(),
+                    score: 1.0,
+                    start_line: start_lines.value(i),
+                    end_line: end_lines.value(i),
+                    chunk_kind: chunk_kinds.value(i).to_string(),
+                    name: names.value(i).to_string(),
+                });
+            }
+        }
+
         Ok(hits)
     }
 
