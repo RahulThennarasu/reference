@@ -59,23 +59,35 @@ async fn index_file(embedder: &Embedder, store: &Store, path: &Path) -> Result<(
     let chunk_count = chunks.len();
 
     let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-    let embeddings = embedder.embed_batch(&texts)?;
+    // `_with_truncation`, not plain `embed_batch`: this is the indexing
+    // path, where a chunk silently getting cut off means part of it never
+    // becomes searchable — see gap #4 in docs/feature-gaps.md. The bool
+    // rides along into `ChunkRecord`/the `truncated` column so the app can
+    // surface it on affected results instead of it being invisible.
+    let embeddings = embedder.embed_batch_with_truncation(&texts)?;
+    let truncated_count = embeddings.iter().filter(|(_, t)| *t).count();
 
     let records: Vec<ChunkRecord> = chunks
         .into_iter()
         .zip(embeddings)
-        .map(|(c, embedding)| ChunkRecord {
+        .map(|(c, (embedding, truncated))| ChunkRecord {
             start_line: c.start_line,
             end_line: c.end_line,
             kind: c.kind,
             content: c.content,
             embedding,
             name: c.name.unwrap_or_default(),
+            truncated,
         })
         .collect();
 
     store.replace_chunks(&path_str, records).await?;
     println!("indexed {path_str} ({chunk_count} chunk(s))");
+    if truncated_count > 0 {
+        println!(
+            "  warning: {truncated_count} chunk(s) in {path_str} exceeded the embedding model's token limit and were truncated — search may miss content near the end of those chunks"
+        );
+    }
     Ok(())
 }
 

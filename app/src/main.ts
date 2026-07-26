@@ -99,6 +99,7 @@ interface SearchResult {
   end_line: number;
   chunk_kind: string;
   exact_match: boolean;
+  truncated: boolean;
 }
 
 interface Citation {
@@ -107,6 +108,7 @@ interface Citation {
   start_line: number;
   end_line: number;
   chunk_kind: string;
+  truncated: boolean;
 }
 
 interface SearchResponse {
@@ -462,6 +464,20 @@ function renderError(message: string) {
 // than joining every snippet into one paragraph — concatenating sentences
 // pulled from unrelated files reads as an incoherent run-on, especially once
 // more than one folder is watched.
+// Shared between plain results and citations — a chunk long enough to
+// exceed the embedding model's token limit got silently cut down before
+// embedding (see gap #4 in docs/feature-gaps.md), so search may be missing
+// content near its end. Amber, not the blue used for exact-match/certainty
+// signals elsewhere, since this is a caveat about the result, not a
+// confidence boost.
+function truncatedBadge(): HTMLElement {
+  const badge = document.createElement("span");
+  badge.className = "truncated-badge";
+  badge.textContent = "truncated";
+  badge.title = "this chunk is longer than the embedding model can fully read — search may miss content near the end";
+  return badge;
+}
+
 function renderCitation(citation: Citation, query: string): HTMLElement {
   const li = document.createElement("li");
   li.className = "answer clickable";
@@ -494,6 +510,8 @@ function renderCitation(citation: Citation, query: string): HTMLElement {
   source.appendChild(icon);
   source.appendChild(label);
   li.appendChild(source);
+
+  if (citation.truncated) li.appendChild(truncatedBadge());
 
   li.appendChild(
     sendButton((btn) =>
@@ -560,6 +578,7 @@ function renderResponse(response: SearchResponse, query: string) {
       badge.title = "exact symbol match";
       li.appendChild(badge);
     }
+    if (r.truncated) li.appendChild(truncatedBadge());
 
     li.appendChild(
       sendButton(async (btn) => {

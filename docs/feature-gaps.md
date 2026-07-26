@@ -22,9 +22,11 @@ closed, app-only (the mcp `search` tool is deliberately untouched, per the reaso
 
 **breaking schema change, no migration path.** adding the `name` column means an index built before this change is missing it entirely — `hybrid_search`/`find_by_name` will error (`missing name column`) against an old on-disk table, the same "wipe and reindex" situation `docs/code-aware-chunking.md` already documents hitting twice before. there's still no migration system in this codebase; this is the third time the fix was `rm -rf ~/.reference/index` and letting it reindex from a clean schema.
 
-## 4. silent truncation with no visibility
+## 4. silent truncation with no visibility — closed
 
-a chunk longer than the embedding model's token limit gets truncated with just a log line, nothing surfaced to the user. search quality can quietly degrade on unusually large functions and nobody watching the ui would know it happened.
+a chunk longer than the embedding model's token limit got truncated with not even a log line, let alone anything surfaced to the user. search quality could quietly degrade on unusually large functions/files and nobody watching the ui would know it happened.
+
+closed: `Embedder::embed_batch_with_truncation` (`core/src/embedding.rs`) checks each input's `Encoding::get_overflowing()` after tokenization — non-empty means `Tokenizer::truncate` cut it down to fit `max_position_embeddings`, a cheap check with no extra tokenization pass needed. `watcher.rs`'s indexing path uses this (not plain `embed_batch`, which query embedding still uses — queries are always short, so it wasn't the problem) and now prints a per-file warning with the truncated chunk count. The flag rides all the way to the ui: a new `truncated` column (`core/src/store.rs`'s schema, another `rm -rf ~/.reference/index` migration, same as gap #3's `name` column) flows through `HybridHit`/`Citation`/`SearchResult` into an amber `TRUNCATED` badge next to any affected result or citation — deliberately amber, not the blue used for `EXACT`/confidence signals, since this is a caveat about the result, not a confidence boost. Turned out to be a real, not hypothetical, problem on this project's own index: reindexing this repo flagged `CLAUDE.md`, `README.md`, every doc in `docs/`, `Cargo.lock`, `pnpm-lock.yaml`, several large `.rs`/`.ts` chunks, and — non-obviously — the default vite/tauri/typescript logo `.svg` files, whose path data is one long whitespace-free numeric string with no natural token boundaries for BERT's tokenizer to split on.
 
 ## 5. zero configurability
 

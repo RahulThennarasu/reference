@@ -68,6 +68,12 @@ struct SearchResult {
     // ranking — the UI badges these differently, since "this is literally
     // the thing you named" is a stronger claim than "this looks relevant".
     exact_match: bool,
+    // True when this chunk exceeded the embedding model's token limit and
+    // got silently cut down before embedding (see gap #4 in
+    // docs/feature-gaps.md) — search may be missing content near the end of
+    // this specific chunk, which is worth surfacing rather than leaving
+    // invisible.
+    truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -77,6 +83,7 @@ struct Citation {
     start_line: usize,
     end_line: usize,
     chunk_kind: String,
+    truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -162,6 +169,7 @@ async fn search(
                 start_line: c.start_line,
                 end_line: c.end_line,
                 chunk_kind: c.chunk_kind,
+                truncated: c.truncated,
             })
             .collect()
     } else {
@@ -183,6 +191,7 @@ async fn search(
             end_line: h.end_line as usize,
             chunk_kind: h.chunk_kind,
             exact_match: true,
+            truncated: h.truncated,
         })
         .chain(
             hits.into_iter()
@@ -194,6 +203,7 @@ async fn search(
                     end_line: h.end_line as usize,
                     chunk_kind: h.chunk_kind,
                     exact_match: false,
+                    truncated: h.truncated,
                 }),
         )
         .take(top_k)

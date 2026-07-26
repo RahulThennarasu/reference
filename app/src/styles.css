@@ -143,6 +143,24 @@ body {
   text-transform: uppercase;
 }
 
+/* Same treatment as .exact-match-badge (plain colored monospace text, no
+   pill), but amber rather than blue — this is a caveat about the result
+   (part of it may not have made it into the index), not a confidence
+   signal, so it deliberately doesn't share the "this one's certain" blue
+   used everywhere else in the app. Uses .hljs-number's amber/orange so it
+   still reads as "part of the same syntax-highlighting palette" rather
+   than an unrelated warning color bolted on. */
+.truncated-badge {
+  flex-shrink: 0;
+  margin-left: 8px;
+  color: #ff8b1a;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .answer {
   position: relative;
   padding: 6px 34px 6px 12px;

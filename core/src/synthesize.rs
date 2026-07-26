@@ -21,6 +21,7 @@ pub struct Citation {
     pub start_line: usize,
     pub end_line: usize,
     pub chunk_kind: String,
+    pub truncated: bool,
 }
 
 /// 1-indexed line number where `needle` first appears in `content`. Falls
@@ -137,6 +138,7 @@ pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Resul
                 start_line: hit.start_line as usize,
                 end_line: hit.end_line as usize,
                 chunk_kind: hit.chunk_kind.clone(),
+                truncated: hit.truncated,
             });
             continue;
         }
@@ -170,6 +172,7 @@ pub fn synthesize(embedder: &Embedder, query: &str, hits: &[HybridHit]) -> Resul
             start_line: line,
             end_line: line,
             chunk_kind: hit.chunk_kind.clone(),
+            truncated: hit.truncated,
         });
     }
 

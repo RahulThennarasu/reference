@@ -59,12 +59,31 @@ impl Embedder {
     }
 
     /// Embeds a batch of texts, returning one mean-pooled, L2-normalized
-    /// 384-dim vector per input string.
+    /// 384-dim vector per input string. Discards per-input truncation info —
+    /// use `embed_batch_with_truncation` when that matters (indexing, where
+    /// silently truncating a chunk means part of it never becomes
+    /// searchable — not query embedding, where queries are always short).
     pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(self
+            .embed_batch_with_truncation(texts)?
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect())
+    }
+
+    /// Same as `embed_batch`, but also reports whether each input exceeded
+    /// the tokenizer's `max_length` (set in `load()` from the model's
+    /// `max_position_embeddings`) and got silently cut down to fit.
+    /// `Tokenizer::truncate` moves anything past that limit into the
+    /// encoding's `overflowing` list rather than erroring — checking
+    /// whether that list is non-empty is the cheap, reliable way to detect
+    /// it happened, no separate un-truncated tokenization pass needed.
+    pub fn embed_batch_with_truncation(&self, texts: &[String]) -> Result<Vec<(Vec<f32>, bool)>> {
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
+        let truncated: Vec<bool> = encodings.iter().map(|e| !e.get_overflowing().is_empty()).collect();
 
         let token_ids: Vec<Tensor> = encodings
             .iter()
@@ -101,7 +120,7 @@ impl Embedder {
         let normalized = pooled.broadcast_div(&norm)?;
 
         let out: Vec<Vec<f32>> = normalized.to_vec2()?;
-        Ok(out)
+        Ok(out.into_iter().zip(truncated).collect())
     }
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {

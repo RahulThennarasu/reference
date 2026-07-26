@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{
-    cast::AsArray, types::Float32Type, FixedSizeListArray, Int32Array, RecordBatch,
+    cast::AsArray, types::Float32Type, BooleanArray, FixedSizeListArray, Int32Array, RecordBatch,
     RecordBatchIterator, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -48,6 +48,7 @@ pub struct HybridHit {
     pub end_line: i32,
     pub chunk_kind: String,
     pub name: String,
+    pub truncated: bool,
 }
 
 /// One chunk of a file (a function, an impl block, or the whole file as a
@@ -55,7 +56,12 @@ pub struct HybridHit {
 /// identifier when `chunk::extract_name` found one (empty string otherwise —
 /// stored as a plain, non-nullable column like every other field here rather
 /// than `Option`, matching this schema's existing convention), and is what
-/// `Store::find_by_name` matches on for exact-symbol lookup.
+/// `Store::find_by_name` matches on for exact-symbol lookup. `truncated` is
+/// whether `Embedder::embed_batch_with_truncation` had to cut this chunk's
+/// content down to fit the model's token limit before embedding — see gap
+/// #4 in docs/feature-gaps.md: without this, a chunk long enough to get
+/// silently truncated just has degraded search quality with no visible
+/// reason why.
 pub struct ChunkRecord {
     pub start_line: i32,
     pub end_line: i32,
@@ -63,6 +69,7 @@ pub struct ChunkRecord {
     pub content: String,
     pub embedding: Vec<f32>,
     pub name: String,
+    pub truncated: bool,
 }
 
 pub struct Store {
@@ -77,6 +84,7 @@ fn schema() -> SchemaRef {
         Field::new("chunk_kind", DataType::Utf8, false),
         Field::new("content", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),
+        Field::new("truncated", DataType::Boolean, false),
         Field::new(
             "embedding",
             DataType::FixedSizeList(
@@ -127,6 +135,7 @@ impl Store {
         let mut kinds = Vec::with_capacity(n);
         let mut contents = Vec::with_capacity(n);
         let mut names = Vec::with_capacity(n);
+        let mut truncated = Vec::with_capacity(n);
         let mut embeddings = Vec::with_capacity(n);
         for c in chunks {
             paths.push(path.to_string());
@@ -135,6 +144,7 @@ impl Store {
             kinds.push(c.kind);
             contents.push(c.content);
             names.push(c.name);
+            truncated.push(c.truncated);
             embeddings.push(Some(c.embedding.into_iter().map(Some).collect::<Vec<_>>()));
         }
 
@@ -147,6 +157,7 @@ impl Store {
                 Arc::new(StringArray::from(kinds)),
                 Arc::new(StringArray::from(contents)),
                 Arc::new(StringArray::from(names)),
+                Arc::new(BooleanArray::from(truncated)),
                 Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
                     embeddings,
                     EMBEDDING_DIM as i32,
@@ -196,6 +207,7 @@ impl Store {
             "chunk_kind".to_string(),
             "content".to_string(),
             "name".to_string(),
+            "truncated".to_string(),
             "embedding".to_string(),
         ]));
         if let Some(folder) = folder {
@@ -249,6 +261,10 @@ impl Store {
                 .column_by_name("name")
                 .context("missing name column")?
                 .as_string::<i32>();
+            let truncated_flags = batch
+                .column_by_name("truncated")
+                .context("missing truncated column")?
+                .as_boolean();
             let embeddings = batch
                 .column_by_name("embedding")
                 .context("missing embedding column")?
@@ -286,6 +302,7 @@ impl Store {
                     end_line: end_lines.value(i),
                     chunk_kind: chunk_kinds.value(i).to_string(),
                     name: names.value(i).to_string(),
+                    truncated: truncated_flags.value(i),
                 });
             }
         }
@@ -323,6 +340,7 @@ impl Store {
                 "chunk_kind".to_string(),
                 "content".to_string(),
                 "name".to_string(),
+                "truncated".to_string(),
             ]))
             .only_if(predicate)
             .execute()
@@ -350,6 +368,10 @@ impl Store {
                 .context("missing content column")?
                 .as_string::<i32>();
             let names = batch.column_by_name("name").context("missing name column")?.as_string::<i32>();
+            let truncated_flags = batch
+                .column_by_name("truncated")
+                .context("missing truncated column")?
+                .as_boolean();
 
             for i in 0..batch.num_rows() {
                 hits.push(HybridHit {
@@ -360,6 +382,7 @@ impl Store {
                     end_line: end_lines.value(i),
                     chunk_kind: chunk_kinds.value(i).to_string(),
                     name: names.value(i).to_string(),
+                    truncated: truncated_flags.value(i),
                 });
             }
         }
