@@ -18,11 +18,11 @@
         "title": "reference",
         "width": 680,
         "height": 64,
-        "center": true,
         "resizable": true,
         "decorations": false,
         "transparent": true,
-        "shadow": true
+        "shadow": true,
+        "visible": false
       }
     ],
     "security": {

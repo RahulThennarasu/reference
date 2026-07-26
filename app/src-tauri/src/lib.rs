@@ -9,7 +9,7 @@ use reference_core::store::{RankingWeights, Store};
 use reference_core::synthesize;
 use reference_core::watcher;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, PhysicalPosition, State};
 
 /// The stop flag alone isn't enough to safely purge a folder's indexed rows:
 /// `watcher::watch`'s loop only checks it *before* waiting for the next
@@ -635,6 +635,29 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
+        .setup(|app| {
+            // The window starts hidden (`"visible": false` in
+            // tauri.conf.json) specifically so this can position it before
+            // first paint — showing it centered (the old default) and then
+            // jumping it up here would flash visibly. Positioned near the
+            // top of the screen's work area (excludes the menu bar/dock),
+            // not dead center, matching where a launcher like Spotlight/
+            // Raycast/Alfred conventionally appears rather than the middle
+            // of the screen.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = window.primary_monitor() {
+                    let work_area = monitor.work_area();
+                    let scale = monitor.scale_factor();
+                    let window_width_px = (680.0 * scale).round() as i32;
+                    let x = work_area.position.x
+                        + (work_area.size.width as i32 - window_width_px) / 2;
+                    let y = work_area.position.y + (work_area.size.height as f64 * 0.12) as i32;
+                    let _ = window.set_position(PhysicalPosition::new(x, y));
+                }
+                let _ = window.show();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             search,
             find_line,
