@@ -1,6 +1,6 @@
 # distribution
 
-status: not started. scoping doc, mac only for now (this project only targets mac right now, no cuda/windows code exists yet, see readme.md).
+status: manual local build works. sections 1-3 (signing identity, notarization, entitlements) verified end-to-end via `pnpm tauri build` — produces a signed, notarized, stapled `.app` + `.dmg` given a "Developer ID Application" cert in the keychain and `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`/`APPLE_SIGNING_IDENTITY` exported locally. section 4 (`.github/workflows/release.yml`, automated on tag push) not started. section 5 (auto-update) not started, per its own note not required yet. mac only for now (this project only targets mac right now, no cuda/windows code exists yet, see readme.md).
 
 ## the problem
 
