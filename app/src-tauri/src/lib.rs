@@ -9,7 +9,8 @@ use reference_core::store::{RankingWeights, Store};
 use reference_core::synthesize;
 use reference_core::watcher;
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, PhysicalPosition, State};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, PhysicalPosition, State, WindowEvent};
 
 /// The stop flag alone isn't enough to safely purge a folder's indexed rows:
 /// `watcher::watch`'s loop only checks it *before* waiting for the next
@@ -656,7 +657,46 @@ pub fn run() {
                 }
                 let _ = window.show();
             }
+
+            // Menu bar icon so the window can be brought back after being
+            // closed (see the `on_window_event` below, which hides "main"
+            // instead of destroying it on close specifically so there's
+            // still a window for this to show/focus). `icon_as_template`
+            // is macOS-only: it tells the OS to render just the icon's
+            // alpha-channel silhouette in solid black/white, adapting to
+            // light/dark menu bar automatically, instead of showing the
+            // icon's actual (light gray) pixel colors verbatim.
+            TrayIconBuilder::new()
+                .icon(tauri::include_image!("icons/tray-icon.png"))
+                .icon_as_template(true)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Closing "main" hides it rather than destroying it, so the
+            // tray icon's click handler always has a window to show/focus
+            // instead of needing to recreate one from scratch.
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             search,
