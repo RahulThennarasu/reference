@@ -31,7 +31,7 @@ the name reflects the core mechanism: the index doesn't store or duplicate your 
 
 ## known gaps / things to verify before relying on them
 
-- `merge_insert` has a reported (possibly fixed) issue when called on a table that already has a vector index built. test this specifically once indexing is running past the prototype stage, not just on a fresh unindexed table.
+- ~~`merge_insert` has a reported (possibly fixed) issue when called on a table that already has a vector index built.~~ verified fixed on lancedb 0.31.0: `core/src/store.rs`'s `merge_insert_after_vector_index_is_built` test builds a real IVF-PQ index (300+ rows) then runs the same delete+merge_insert upsert `replace_chunks` does against it — upsert succeeds, stale rows are gone, and the updated row stays searchable.
 - lancedb's rust crate is younger and less battle-tested than its python bindings. if something about table operations behaves unexpectedly, check `docs.rs/lancedb/latest` directly rather than assuming parity with python docs/behavior.
 - the `embeddings` module in the lancedb crate leans on openai/bedrock integrations, not used here. embeddings are computed manually via `candle` and inserted as plain vectors.
 

@@ -182,6 +182,220 @@ impl ServerHandler for ReferenceServer {
     }
 }
 
+// Regression tests for the agent-facing MCP contract — the `search` tool's
+// JSON shape, `top_k`, and `folder` scoping. Deliberately bypasses
+// `ReferenceServer::new()`, which always opens the real `~/.reference` index
+// (see `paths::default_db_uri`); tests build a `ReferenceServer` directly
+// against a temp store instead, so running this suite never touches a real
+// user's index. Real candle model, same rationale as core's tests.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reference_core::chunk;
+    use reference_core::embedding::EmbeddingModel;
+    use reference_core::store::ChunkRecord;
+    use tokio::sync::OnceCell;
+
+    static EMBEDDER: OnceCell<std::sync::Arc<Embedder>> = OnceCell::const_new();
+
+    async fn embedder() -> std::sync::Arc<Embedder> {
+        EMBEDDER
+            .get_or_init(|| async { std::sync::Arc::new(Embedder::load(EmbeddingModel::MiniLmL6).await.unwrap()) })
+            .await
+            .clone()
+    }
+
+    async fn records_for(embedder: &Embedder, extension: &str, source: &str) -> Vec<ChunkRecord> {
+        let chunks = chunk::chunk_or_whole_file(extension, source);
+        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        let embeddings = embedder.embed_batch_with_truncation(&texts).unwrap();
+        chunks
+            .into_iter()
+            .zip(embeddings)
+            .map(|(c, (embedding, truncated))| ChunkRecord {
+                start_line: c.start_line,
+                end_line: c.end_line,
+                kind: c.kind,
+                content: c.content,
+                embedding,
+                name: c.name.unwrap_or_default(),
+                truncated,
+            })
+            .collect()
+    }
+
+    async fn test_server() -> (tempfile::TempDir, ReferenceServer) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let embedder = embedder().await;
+        let store = Store::open(dir.path().to_str().unwrap()).await.expect("open store");
+        let server = ReferenceServer {
+            embedder,
+            store: std::sync::Arc::new(store),
+            tool_router: ReferenceServer::tool_router(),
+        };
+        (dir, server)
+    }
+
+    fn extract_json(result: &CallToolResult) -> serde_json::Value {
+        let text = result.content[0].as_text().expect("search must return a text content block");
+        serde_json::from_str(&text.text).expect("search result must be valid JSON")
+    }
+
+    #[tokio::test]
+    async fn search_ranks_the_semantically_relevant_file_first() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        server
+            .store
+            .replace_chunks(
+                "/proj/config.rs",
+                records_for(&embedder, "rs", "fn parse_config(path: &str) -> bool { path.ends_with(\".toml\") }").await,
+            )
+            .await
+            .unwrap();
+        server
+            .store
+            .replace_chunks(
+                "/proj/widget.rs",
+                records_for(&embedder, "rs", "fn render_widget(name: &str) -> String { format!(\"<widget {name}>\") }").await,
+            )
+            .await
+            .unwrap();
+
+        let result = server
+            .search(Parameters(SearchParams {
+                query: "reading a configuration file from disk".to_string(),
+                top_k: None,
+                folder: None,
+            }))
+            .await
+            .expect("search must succeed");
+
+        let body = extract_json(&result);
+        let results = body["results"].as_array().unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0]["path"], "/proj/config.rs");
+        assert!(results[0]["content"].as_str().unwrap().contains("parse_config"));
+    }
+
+    #[tokio::test]
+    async fn search_top_k_limits_the_returned_result_count() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        for i in 0..5 {
+            server
+                .store
+                .replace_chunks(
+                    &format!("/proj/file{i}.rs"),
+                    records_for(&embedder, "rs", &format!("fn function_{i}() -> i32 {{ {i} }}")).await,
+                )
+                .await
+                .unwrap();
+        }
+
+        let result = server
+            .search(Parameters(SearchParams {
+                query: "a function".to_string(),
+                top_k: Some(2),
+                folder: None,
+            }))
+            .await
+            .expect("search must succeed");
+
+        let body = extract_json(&result);
+        assert_eq!(body["results"].as_array().unwrap().len(), 2);
+    }
+
+    /// The exact regression `docs/mcp-agent-usage.md` calls out as an actual
+    /// observed failure mode: an unrelated watched folder that happens to
+    /// share vocabulary with the query outranking the file that's actually
+    /// relevant, unless `folder` scoping excludes it entirely.
+    #[tokio::test]
+    async fn search_folder_param_excludes_other_watched_folders() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        server
+            .store
+            .replace_chunks(
+                "/watched/proj_a/widget.rs",
+                records_for(&embedder, "rs", "fn render_widget(name: &str) -> String { format!(\"<widget {name}>\") }").await,
+            )
+            .await
+            .unwrap();
+        server
+            .store
+            .replace_chunks(
+                "/watched/proj_b/widget.rs",
+                records_for(&embedder, "rs", "fn render_widget(name: &str) -> String { format!(\"<other-widget {name}>\") }").await,
+            )
+            .await
+            .unwrap();
+
+        let result = server
+            .search(Parameters(SearchParams {
+                query: "render a widget".to_string(),
+                top_k: None,
+                folder: Some("/watched/proj_a".to_string()),
+            }))
+            .await
+            .expect("search must succeed");
+
+        let body = extract_json(&result);
+        let results = body["results"].as_array().unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results.iter().all(|r| r["path"].as_str().unwrap().starts_with("/watched/proj_a/")),
+            "folder scoping must exclude every hit from other watched folders: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_returns_citations_only_for_question_shaped_queries() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        server
+            .store
+            .replace_chunks(
+                "/proj/config.rs",
+                records_for(&embedder, "rs", "fn parse_config(path: &str) -> bool { path.ends_with(\".toml\") }").await,
+            )
+            .await
+            .unwrap();
+
+        let question = server
+            .search(Parameters(SearchParams {
+                query: "how do we parse a config file".to_string(),
+                top_k: None,
+                folder: None,
+            }))
+            .await
+            .expect("search must succeed");
+        let question_body = extract_json(&question);
+        assert!(
+            !question_body["citations"].as_array().unwrap().is_empty(),
+            "a question-shaped query with matches should synthesize citations"
+        );
+
+        let keyword = server
+            .search(Parameters(SearchParams {
+                query: "parse_config".to_string(),
+                top_k: None,
+                folder: None,
+            }))
+            .await
+            .expect("search must succeed");
+        let keyword_body = extract_json(&keyword);
+        assert!(
+            keyword_body["citations"].as_array().unwrap().is_empty(),
+            "a literal identifier query is not question-shaped and should skip synthesis"
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()

@@ -441,6 +441,236 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+// Regression tests for the store/upsert layer, run against a real candle
+// model rather than stubbed embeddings — the point is to catch real
+// embedding/merge_insert regressions before a release build, not just
+// exercise the arrow plumbing with fake vectors. Model weights are
+// downloaded once (hf-hub caches to disk), so the first run is slow and
+// needs network; subsequent runs load from the local cache.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk;
+    use crate::embedding::{Embedder, EmbeddingModel};
+    use lancedb::index::Index;
+    use tokio::sync::OnceCell;
+
+    // Loaded once and shared across tests in this binary: reloading the
+    // model per-test would multiply an already-slow (network + safetensors
+    // parse) operation for no benefit, since the model itself is read-only.
+    static EMBEDDER: OnceCell<Embedder> = OnceCell::const_new();
+
+    async fn embedder() -> &'static Embedder {
+        EMBEDDER
+            .get_or_init(|| async { Embedder::load(EmbeddingModel::MiniLmL6).await.unwrap() })
+            .await
+    }
+
+    async fn open_temp_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(dir.path().to_str().unwrap()).await.expect("open store");
+        (dir, store)
+    }
+
+    /// Chunks `source` with the real tree-sitter chunker and embeds every
+    /// chunk with the real model — mirrors what `watcher::index_file` does,
+    /// without needing filesystem I/O.
+    async fn records_for(embedder: &Embedder, extension: &str, source: &str) -> Vec<ChunkRecord> {
+        let chunks = chunk::chunk_or_whole_file(extension, source);
+        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        let embeddings = embedder.embed_batch_with_truncation(&texts).unwrap();
+        chunks
+            .into_iter()
+            .zip(embeddings)
+            .map(|(c, (embedding, truncated))| ChunkRecord {
+                start_line: c.start_line,
+                end_line: c.end_line,
+                kind: c.kind,
+                content: c.content,
+                embedding,
+                name: c.name.unwrap_or_default(),
+                truncated,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_and_find_by_name_roundtrip() {
+        let embedder = embedder().await;
+        let (_dir, store) = open_temp_store().await;
+
+        let source = r#"
+fn parse_config(path: &str) -> bool {
+    // reads a toml config file from disk and validates its fields
+    path.ends_with(".toml")
+}
+
+fn render_widget(name: &str) -> String {
+    // draws a ui widget to the screen given its name
+    format!("<widget {name}>")
+}
+"#;
+        let records = records_for(embedder, "rs", source).await;
+        store.replace_chunks("/proj/lib.rs", records).await.unwrap();
+
+        let query_embedding = embedder.embed("reading a configuration file from disk").unwrap();
+        let hits = store
+            .hybrid_search(
+                "reading a configuration file from disk",
+                &query_embedding,
+                5,
+                None,
+                &RankingWeights::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!hits.is_empty(), "expected at least one hit");
+        assert_eq!(hits[0].name, "parse_config", "semantic search should rank the config-parsing function first");
+
+        let by_name = store.find_by_name("render_widget", None).await.unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert!(by_name[0].content.contains("render_widget"));
+
+        assert!(store.find_by_name("does_not_exist", None).await.unwrap().is_empty());
+    }
+
+    /// Targets the risk CLAUDE.md calls out directly: `replace_chunks` has
+    /// to delete-then-merge_insert, because merge_insert alone can't express
+    /// "this chunk's underlying function was deleted". A regression here
+    /// (e.g. someone changing this back to a bare merge_insert without the
+    /// preceding delete) would leave stale, deleted-function chunks
+    /// permanently searchable.
+    #[tokio::test]
+    async fn replace_chunks_upsert_removes_chunks_for_deleted_functions() {
+        let embedder = embedder().await;
+        let (_dir, store) = open_temp_store().await;
+
+        let before = r#"
+fn keep_me() -> i32 { 1 }
+
+fn delete_me() -> i32 { 2 }
+"#;
+        let records = records_for(embedder, "rs", before).await;
+        // No preamble chunk: everything before the first `fn` is blank, and
+        // `chunk_or_whole_file` only emits a preamble chunk for non-blank
+        // leading content (see `chunk::chunk_with`).
+        assert_eq!(records.len(), 2, "2 functions, no preamble");
+        store.replace_chunks("/proj/edit.rs", records).await.unwrap();
+        assert_eq!(store.row_count().await.unwrap(), 2);
+
+        let after = r#"
+fn keep_me() -> i32 { 1 }
+"#;
+        let records = records_for(embedder, "rs", after).await;
+        store.replace_chunks("/proj/edit.rs", records).await.unwrap();
+
+        assert_eq!(
+            store.row_count().await.unwrap(),
+            1,
+            "stale chunk for the deleted function must not survive re-indexing"
+        );
+        assert!(store.find_by_name("delete_me", None).await.unwrap().is_empty());
+        assert_eq!(store.find_by_name("keep_me", None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_under_only_removes_matching_folder() {
+        let embedder = embedder().await;
+        let (_dir, store) = open_temp_store().await;
+
+        store
+            .replace_chunks("/watched/proj/a.rs", records_for(embedder, "rs", "fn a() {}").await)
+            .await
+            .unwrap();
+        store
+            .replace_chunks("/watched/other/b.rs", records_for(embedder, "rs", "fn b() {}").await)
+            .await
+            .unwrap();
+
+        store.delete_under("/watched/proj").await.unwrap();
+
+        assert!(store.find_by_name("a", None).await.unwrap().is_empty());
+        assert_eq!(store.find_by_name("b", None).await.unwrap().len(), 1);
+    }
+
+    /// Known gap from CLAUDE.md: "merge_insert has a reported (possibly
+    /// fixed) issue when called on a table that already has a vector index
+    /// built. test this specifically once indexing is running past the
+    /// prototype stage, not just on a fresh unindexed table." This builds a
+    /// real IVF-PQ index (needs enough rows to train), then runs the same
+    /// upsert path a live edit would trigger, and confirms the index isn't
+    /// left in a state that breaks search or hides the update.
+    #[tokio::test]
+    async fn merge_insert_after_vector_index_is_built() {
+        let embedder = embedder().await;
+        let (_dir, store) = open_temp_store().await;
+
+        // Filler rows purely to give IVF-PQ enough vectors to train a
+        // partition on — content is irrelevant, only the row count and the
+        // fact they're real (non-degenerate) embeddings matters.
+        let filler_texts: Vec<String> = (0..300).map(|i| format!("filler document number {i} about topic {}", i % 17)).collect();
+        let filler_embeddings = embedder.embed_batch(&filler_texts).unwrap();
+        let filler_records: Vec<ChunkRecord> = filler_texts
+            .iter()
+            .zip(filler_embeddings)
+            .enumerate()
+            .map(|(i, (text, embedding))| ChunkRecord {
+                start_line: i as i32,
+                end_line: i as i32,
+                kind: "file".to_string(),
+                content: text.clone(),
+                embedding,
+                name: String::new(),
+                truncated: false,
+            })
+            .collect();
+        store.replace_chunks("/filler/doc.txt", filler_records).await.unwrap();
+
+        let before = r#"
+fn keep_me() -> i32 { 1 }
+
+fn delete_me() -> i32 { 2 }
+"#;
+        store
+            .replace_chunks("/proj/edit.rs", records_for(embedder, "rs", before).await)
+            .await
+            .unwrap();
+
+        store
+            .table
+            .create_index(&["embedding"], Index::Auto)
+            .execute()
+            .await
+            .expect("vector index build should succeed");
+
+        // Same upsert a live file edit triggers, now against an indexed table.
+        let after = r#"
+fn keep_me() -> i32 { 1 }
+"#;
+        store
+            .replace_chunks("/proj/edit.rs", records_for(embedder, "rs", after).await)
+            .await
+            .expect("merge_insert upsert must still succeed once a vector index exists");
+
+        assert!(
+            store.find_by_name("delete_me", None).await.unwrap().is_empty(),
+            "stale chunk must not survive an upsert against an indexed table"
+        );
+        assert_eq!(store.find_by_name("keep_me", None).await.unwrap().len(), 1);
+
+        let query_embedding = embedder.embed("keep_me").unwrap();
+        let hits = store
+            .hybrid_search("keep_me", &query_embedding, 5, None, &RankingWeights::default())
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.name == "keep_me"),
+            "post-index upsert must remain searchable"
+        );
+    }
+}
+
 /// Lowercased, deduplicated query words worth checking for literal presence
 /// in a chunk's content — short/common tokens are dropped since they'd match
 /// almost any chunk and add noise rather than signal.
