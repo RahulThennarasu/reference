@@ -11,15 +11,35 @@ on:
     branches: [main]
   pull_request:
 
+# Default GITHUB_TOKEN to read-only. Nothing in this workflow needs to
+# write to the repo, comment on PRs, or push packages — a compromised
+# dependency's build.rs/proc-macro shouldn't be able to do anything with
+# the token beyond reading.
+permissions:
+  contents: read
+
+# A new push to the same PR/branch cancels the in-flight run instead of
+# queuing another one against (possibly) untrusted PR content.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # cargo build.rs scripts and proc-macros run arbitrary code
+          # during `cargo test`. Don't leave a git credential helper
+          # configured that a malicious dependency could read.
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
 
       # The store/watcher/mcp tests load a real candle model (MiniLM) via
       # hf-hub rather than stubbing embeddings, so a regression in actual
@@ -27,10 +47,26 @@ jobs:
       # test module doc comment. Caching the download keeps every run after
       # the first one fast instead of re-pulling ~90mb of weights each time.
       - name: cache huggingface model weights
-        uses: actions/cache@v4
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/.cache/huggingface
           key: huggingface-models-${{ hashFiles('core/src/embedding.rs') }}
 
       - name: cargo test --workspace
         run: cargo test --workspace --locked
+
+  # Dependency-level supply chain check: fails the build if Cargo.lock
+  # pulls in a crate with a published RUSTSEC advisory (known
+  # vulnerability, unmaintained, or yanked). Separate job so a flagged
+  # advisory doesn't block the test job's cache/signal, and so this can
+  # be made required independently in branch protection.
+  audit:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
