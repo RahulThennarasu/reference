@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "reference-mcp": {
-      "type": "stdio",
-      "command": "${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp"
-    }
-  }
-}

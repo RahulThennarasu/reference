@@ -46,7 +46,7 @@ this app is the real version: an actual local index of your files, kept current 
 - code-aware chunking: search and cite exact functions/classes, not just whole files
 - answer synthesis with source citations, linking back to the actual file, code citations are syntax-highlighted with a high-contrast palette tuned for the app's dark theme
 - a "send to agent" button on every result and citation: copies a formatted query + code/line-range context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent (claude code, codex, etc.) they're using
-- an MCP server (`mcp/`) exposing a read-only `search` tool over the same index, for agents to query directly mid-task instead of shelling out to a CLI. `cargo build -p reference-mcp` once, then `.mcp.json` (checked into this repo) picks it up automatically — Claude Code still prompts for one-time approval per person, per its project-scoped server rules
+- an MCP server (`mcp/`) exposing a read-only `search` tool over the same index, for agents to query directly mid-task instead of shelling out to a CLI. `cargo build -p reference-mcp` once, then register it yourself with `claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp` — see `docs/mcp-agent-usage.md` for the full setup
 
 ## explicitly out of scope for v1
 

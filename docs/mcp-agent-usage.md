@@ -24,7 +24,11 @@ No `--release` needed for correctness — this project's `[profile.release]` use
 
 Two different audiences, two different paths:
 
-**Working in this repo (contributor/dev):** the repo ships a project-scoped `.mcp.json` (checked into version control) pointing at `${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp`, so it works regardless of where the repo is cloned. Anyone opening this project still sees Claude Code's one-time approval prompt for project-scoped MCP servers (a Claude Code security requirement, not something a checked-in file can bypass) — approve it once via `claude` run interactively, or `claude mcp list` to check status.
+**Working in this repo (contributor/dev):** no checked-in `.mcp.json` — deliberately removed so nothing auto-registers a server for anyone who clones this repo. Build it once (`cargo build -p reference-mcp`), then register it yourself:
+```
+claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp
+```
+`--scope local` is the one that does *not* write to `.mcp.json` — it's stored outside the repo entirely (per-user, per-project), so it's never shared via version control. `--scope project` would recreate the same checked-in `.mcp.json` this setup deliberately removed — don't use it here.
 
 **Installed the app, not the repo (end user):** `reference-mcp` ships inside the app bundle already — Tauri's `externalBin` sidecar mechanism (`app/src-tauri/scripts/prepare-mcp-sidecar.sh`, wired into `beforeBundleCommand`) builds it in release mode and copies it in before every `tauri build`. Verified (by actually building and inspecting the bundle, not just assuming — Tauri's own docs don't document this path) to land at `Contents/MacOS/reference-mcp` on macOS, plain filename, right alongside the main app binary. Register it user-scoped, since there's no project/repo in this case:
 ```
