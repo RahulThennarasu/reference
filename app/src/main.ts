@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import {
   getIconForDirectoryPath,
   getIconUrlByName,
@@ -306,6 +308,14 @@ let copyAllBtnEl: HTMLButtonElement | null;
 let scopeBtnEl: HTMLButtonElement | null;
 let scopeLabelEl: HTMLElement | null;
 let settingsBtnEl: HTMLButtonElement | null;
+let updateDotEl: HTMLElement | null;
+
+// Set once `checkForAppUpdate` finds a newer release; null means either no
+// check has completed yet or the app is already current. Held onto (rather
+// than just a boolean) because `Update.downloadAndInstall` is the object
+// that actually performs the install.
+let pendingUpdate: Update | null = null;
+let updateInstalling = false;
 
 let folderMode = false;
 let folderSuggestions: string[] = [];
@@ -468,6 +478,42 @@ async function loadRankingWeights() {
   }
 }
 
+// Runs once on startup. Silent by design: an offline machine or a check
+// that errors out just means the dot stays hidden, same as being current —
+// there's no "network activity: none" indicator elsewhere in this app
+// (deliberately cut, see CLAUDE.md) and a failed update check shouldn't be
+// the one thing that surfaces network chatter to the user.
+async function checkForAppUpdate() {
+  try {
+    const update = await checkForUpdate();
+    if (update?.available) {
+      pendingUpdate = update;
+      updateDotEl?.classList.add("visible");
+      if (settingsMode) renderSettingsMode();
+    }
+  } catch (err) {
+    console.error("checkForUpdate failed", err);
+  }
+}
+
+// Downloads + installs in one call, then relaunches into the new version.
+// `updateInstalling` guards against a second click firing a second install
+// while the first is still in flight (downloadAndInstall has no built-in
+// re-entrancy guard of its own).
+async function installPendingUpdate() {
+  if (!pendingUpdate || updateInstalling) return;
+  updateInstalling = true;
+  renderSettingsMode();
+  try {
+    await pendingUpdate.downloadAndInstall();
+    await relaunch();
+  } catch (err) {
+    console.error("downloadAndInstall failed", err);
+    updateInstalling = false;
+    renderSettingsMode();
+  }
+}
+
 // Debounced, not one call per slider tick — dragging a slider fires `input`
 // dozens of times a second, and persisting to disk on every one of those
 // would be wasteful (same reasoning as `search()`'s own debounce).
@@ -540,6 +586,23 @@ function renderSettingsMode() {
   lastResponse = null;
   updateCopyAllVisibility();
   resetResultRows();
+
+  if (pendingUpdate) {
+    const updateLabel = document.createElement("li");
+    updateLabel.className = "section-label";
+    updateLabel.textContent = "update";
+    resultsEl.appendChild(updateLabel);
+
+    const row = document.createElement("li");
+    row.className = "result clickable settings-reset";
+    row.textContent = updateInstalling
+      ? "installing update, restarting shortly…"
+      : `install update (v${pendingUpdate.version}) and restart`;
+    if (!updateInstalling) {
+      row.addEventListener("click", () => installPendingUpdate());
+    }
+    resultsEl.appendChild(row);
+  }
 
   const label = document.createElement("li");
   label.className = "section-label";
@@ -1151,6 +1214,7 @@ window.addEventListener("DOMContentLoaded", () => {
   scopeBtnEl = document.querySelector("#scope-btn");
   scopeLabelEl = document.querySelector("#scope-label");
   settingsBtnEl = document.querySelector("#settings-btn");
+  updateDotEl = document.querySelector("#update-dot");
 
   copyAllBtnEl?.addEventListener("click", () => copyAllVisible());
 
@@ -1175,6 +1239,7 @@ window.addEventListener("DOMContentLoaded", () => {
   refreshWatchedFolders();
   loadRankingWeights();
   loadEmbeddingModels();
+  checkForAppUpdate();
 
   searchInputEl?.addEventListener("input", () => {
     // Typing implicitly abandons the scope picker/settings panel in favor

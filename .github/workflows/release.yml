@@ -1,0 +1,129 @@
+name: release
+
+# Triggered by a version tag push (see docs/distribution.md's "release
+# workflow" section, previously not-started). Builds, signs, and notarizes
+# the mac app exactly like a local `pnpm tauri build` (docs/distribution.md
+# sections 1-3, already verified working locally), then publishes the
+# .dmg + a signed `latest.json` update manifest to the public
+# RahulThennarasu/reference-macos repo (kept separate from this private
+# source repo per docs/download-page-usage-terms.md). tauri-plugin-updater
+# (app/src-tauri/tauri.conf.json) polls that repo's
+# releases/latest/download/latest.json for new versions.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Nothing here writes to *this* repo — contents:write is only exercised via
+# RELEASE_MACOS_TOKEN against the separate reference-macos repo (see below),
+# not the default GITHUB_TOKEN. Kept at the default read-only regardless,
+# matching ci.yml's reasoning.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    # Requires a GitHub Environment named "release" (Settings -> Environments
+    # in this repo) with at least one required reviewer configured. Every
+    # secret below — the Apple signing cert, the updater's private key, and
+    # RELEASE_MACOS_TOKEN — only becomes readable by this job once someone
+    # approves the run. That's the gate against a stolen/leaked token or a
+    # hijacked maintainer account silently cutting a real signed, notarized
+    # release: a tag push alone is no longer sufficient, a human has to look
+    # at *which* tag and approve it first. This needs to be created once by
+    # hand; it can't be provisioned from this file.
+    environment: release
+    steps:
+      # Logs every outbound network call this job's process tree makes
+      # (audit mode: observe, don't block — macOS runners' network
+      # enforcement is less mature than Linux's, and this job legitimately
+      # talks to a wide set of hosts: crates.io, the pnpm/npm registry,
+      # Apple's notarization service, GitHub's API for the cross-repo
+      # release). This job is the highest-value target in this repo for
+      # exactly the attack pattern seen in tj-actions/changed-files (2025)
+      # and self-propagating npm supply-chain worms like Shai-Hulud: it's
+      # the one place real signing secrets and a cross-repo write token are
+      # ever in memory at once. The job summary this produces is what you'd
+      # check first if a release ever looked wrong.
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      # --ignore-scripts blocks preinstall/install/postinstall scripts from
+      # every one of the ~85 transitive dependencies pulled in by app's
+      # package.json — exactly the mechanism Shai-Hulud and similar
+      # self-propagating npm worms use to run arbitrary code the moment a
+      # trojanized package is installed, before any of this repo's own code
+      # even runs. `pnpm run postinstall` right after runs only *our own*
+      # authored script (app/package.json's postinstall, which just copies
+      # material-icons assets into public/) — everything else in the
+      # dependency tree stays inert. --frozen-lockfile refuses to install if
+      # pnpm-lock.yaml doesn't exactly match package.json, so a lockfile
+      # that's drifted (tampered with or just stale) fails the build instead
+      # of silently resolving different versions than what's committed.
+      - name: install frontend deps
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run postinstall
+
+      # Puts the "Developer ID Application" cert into a throwaway keychain
+      # for this run only — tauri build's codesign step (invoked by
+      # tauri-action below) needs the cert present in a keychain, it can't
+      # take one as a raw file/env var directly.
+      - name: import apple signing certificate
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      # projectPath points at app/ (not the repo root) since that's where
+      # package.json / pnpm-lock.yaml / src-tauri actually live — matches
+      # how `pnpm tauri build` is run locally (README.md).
+      # includeUpdaterJson (default true) is what produces latest.json
+      # alongside the .dmg, signed with TAURI_SIGNING_PRIVATE_KEY.
+      - name: build, sign, notarize, and publish
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_MACOS_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: "reference ${{ github.ref_name }}"
+          releaseBody: "See tryreference.com for release notes."
+          releaseDraft: false
+          prerelease: false
+          owner: RahulThennarasu
+          repo: reference-macos
+          args: --features metal

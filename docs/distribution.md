@@ -1,6 +1,6 @@
 # distribution
 
-status: manual local build works. sections 1-3 (signing identity, notarization, entitlements) verified end-to-end via `pnpm tauri build` — produces a signed, notarized, stapled `.app` + `.dmg` given a "Developer ID Application" cert in the keychain and `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`/`APPLE_SIGNING_IDENTITY` exported locally. section 4 (`.github/workflows/release.yml`, automated on tag push) not started. section 5 (auto-update) not started, per its own note not required yet. mac only for now (this project only targets mac right now, no cuda/windows code exists yet, see readme.md).
+status: manual local build works. sections 1-3 (signing identity, notarization, entitlements) verified end-to-end via `pnpm tauri build` — produces a signed, notarized, stapled `.app` + `.dmg` given a "Developer ID Application" cert in the keychain and `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`/`APPLE_SIGNING_IDENTITY` exported locally. section 4 (`.github/workflows/release.yml`, automated on tag push) built, not yet run against a real tag — needs the github secrets listed in that section added before the first tag push. section 5 (auto-update) built: `tauri-plugin-updater` checks `https://github.com/RahulThennarasu/reference-macos/releases/latest/download/latest.json` on app startup. mac only for now (this project only targets mac right now, no cuda/windows code exists yet, see readme.md).
 
 ## the problem
 
@@ -31,17 +31,28 @@ the app does two things that macOS increasingly gates behind explicit entitlemen
 
 ### 4. release workflow
 
-none of the above should be a manual step run from someone's laptop, that doesn't scale past one person and isn't reproducible. the standard shape for this is a github actions workflow (`.github/workflows/release.yml`, doesn't exist yet) that:
+`.github/workflows/release.yml` triggers on a `v*.*.*` tag push and runs `tauri-apps/tauri-action` against `app/` (the actual tauri project root — see the workflow's `projectPath: app`), which builds, signs, and notarizes exactly like a local `pnpm tauri build`, then uploads the `.dmg` + a signed `latest.json` (see section 5) as release assets on a *separate* public repo, `RahulThennarasu/reference-macos` — not this repo, which stays private (see `docs/download-page-usage-terms.md` on why that separation matters: a public release repo is the thing an actual user's updater talks to, this source repo never needs to be).
 
-- triggers on a version tag push
-- runs `tauri-apps/tauri-action` (or an equivalent manual `pnpm tauri build` + upload) with the signing cert (base64-encoded `.p12`, stored as a repo secret) and the notarization credentials above also as secrets
-- uploads the resulting `.dmg`/`.app` as a github release artifact
+this needs the following as repo secrets on **this** repo (`reference`), since that's where the workflow runs:
 
-this also forces the version bump + changelog discipline that a manual build process doesn't.
+- `APPLE_CERTIFICATE` / `APPLE_CERTIFICATE_PASSWORD` — base64-encoded "Developer ID Application" `.p12` + its password, imported into a throwaway keychain by `apple-actions/import-codesign-certs`
+- `APPLE_SIGNING_IDENTITY` / `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` — same four env vars section 2 already uses for local notarization
+- `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the updater signing keypair (see section 5)
+- `RELEASE_MACOS_TOKEN` — a fine-grained personal access token with `contents: write` on `RahulThennarasu/reference-macos` specifically (the workflow's own default `GITHUB_TOKEN` only has permissions scoped to `reference`, it can't create a release on a different repo)
 
-### 5. auto-update (stretch, not required for a first release)
+version bumps are still manual: `app/src-tauri/tauri.conf.json`'s `version` field has to be bumped before tagging, since that's what the updater compares against `latest.json`'s version, tagging alone doesn't change it.
 
-tauri has an official updater plugin (`tauri-plugin-updater`) that checks a hosted json manifest for new versions and can apply them in place. worth adding once there's an actual release cadence to update *to*, not before, a first version doesn't need to update itself.
+**hardening against supply-chain/worm-style attacks**, since this workflow is the one place real signing secrets and a cross-repo write token ever exist at once:
+
+- every third-party action in both `ci.yml` and `release.yml` is pinned to a full commit SHA, not a mutable tag
+- `step-security/harden-runner` runs first in every job (audit mode — logs egress, doesn't block, since macOS runner network enforcement is less mature than linux's), giving a concrete log to check if a release ever looks wrong
+- frontend deps install with `--ignore-scripts`, then only this repo's own `postinstall` script runs explicitly — blocks arbitrary preinstall/postinstall code from any of the ~85 transitive npm dependencies, the exact mechanism self-propagating worms like Shai-Hulud use
+- the `release` job requires a GitHub Environment named `release` (Settings -> Environments, not provisionable from the yaml) with a required reviewer — a tag push alone can no longer silently trigger a signed release, someone has to look at which tag and approve it
+- `permissions: contents: read` at the workflow level in both files — the only write capability release.yml uses is `RELEASE_MACOS_TOKEN` (a PAT scoped to `contents: write` on `reference-macos` alone), never the ambient `GITHUB_TOKEN`
+
+### 5. auto-update
+
+`tauri-plugin-updater` (+ `tauri-plugin-process` for `relaunch()` after install) is wired up in `app/src-tauri` (`Cargo.toml`, `lib.rs`'s `.plugin(...)` registration, `capabilities/default.json`'s `updater:default`/`process:allow-restart`). `tauri.conf.json`'s `plugins.updater` points at `https://github.com/RahulThennarasu/reference-macos/releases/latest/download/latest.json` and carries the public half of a dedicated minisign keypair (private half lives only at `~/.tauri/reference-updater.key` on the machine that runs releases, password-protected, never committed — needed as the `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD` secrets in section 4). the app calls `check()` once on startup (`app/src/main.ts`'s `checkForAppUpdate`); if a newer signed release is found it lights a small dot on the settings button rather than interrupting search, and the settings panel (⌘,) gets an "install update and restart" row that calls `downloadAndInstall()` then `relaunch()`.
 
 ## explicitly deferred
 
@@ -51,4 +62,4 @@ tauri has an official updater plugin (`tauri-plugin-updater`) that checks a host
 
 ## effort estimate
 
-the apple developer account and first-time signing/notarization setup is mostly one-time friction (getting certs generated, entitlements right, github secrets configured), probably the slowest part elapsed-time-wise since it involves apple's own account/cert issuance, not code. the github actions workflow itself is small, comparable to a single language addition in `docs/code-aware-chunking.md`'s phased rollout. auto-update is the piece worth explicitly *not* doing yet.
+the apple developer account and first-time signing/notarization setup is mostly one-time friction (getting certs generated, entitlements right, github secrets configured), probably the slowest part elapsed-time-wise since it involves apple's own account/cert issuance, not code. the github actions workflow itself is small, comparable to a single language addition in `docs/code-aware-chunking.md`'s phased rollout. auto-update turned out to be similarly small once the release workflow existed to publish a manifest for it to point at — see section 5.

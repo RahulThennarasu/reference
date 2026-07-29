@@ -40,6 +40,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4NTk5RDQyQzU1MkVCNTMKUldSVDYxTEZRcDFaZUpGWUdGSVNSTFQwUmovNDZ6L3lkd2Z4dk5MT296ZCtrZDgxT2VNTXJoY3oK",
+      "endpoints": [
+        "https://github.com/RahulThennarasu/reference-macos/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

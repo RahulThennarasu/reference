@@ -1,12 +1,12 @@
 # manual update notifications
 
-status: not started. note-to-self doc, not a scoping doc like the others in this folder.
+status: superseded. `tauri-plugin-updater` is now wired up end-to-end — see `docs/distribution.md` section 5. this doc is kept for the historical reasoning below.
 
-## the problem
+## the problem (resolved)
 
-`docs/distribution.md` already scopes auto-update as a stretch goal, deliberately not required for a first release, since there's no hosted update manifest for `tauri-plugin-updater` to point at yet (that needs the download site from `docs/distribution.md` to exist first, and a signed update manifest hosted somewhere on it).
+`docs/distribution.md` used to scope auto-update as a stretch goal, deliberately not required for a first release, since there was no hosted update manifest for `tauri-plugin-updater` to point at yet. that gap is closed: `.github/workflows/release.yml` publishes a signed `latest.json` alongside every `.dmg` to the public `RahulThennarasu/reference-macos` repo, and the app polls it on startup.
 
-until that's built, every new build is a fully manual process on both sides: build it, upload the new `.dmg` to the download page, and separately tell people it exists. nothing in the app itself checks for or surfaces a new version. if that last step doesn't happen, a user who installed once has no way of finding out there's anything newer, no notification, no badge, nothing.
+before this, every new build was a fully manual process on both sides: build it, upload the new `.dmg` to the download page, and separately tell people it exists, with nothing in the app itself checking for or surfacing a new version.
 
 ## what to do until auto-update exists
 

@@ -466,6 +466,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   flex-shrink: 0;
   width: 30px;
   height: 30px;
@@ -504,6 +505,24 @@ body {
 
 .settings-btn:hover .settings-icon {
   opacity: 1;
+}
+
+/* Hidden by default (see main.ts's checkForUpdate) — shown only once a
+   newer release is confirmed available, so the settings icon looks exactly
+   as it always has for anyone already on the latest build. */
+.update-dot {
+  display: none;
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4a9eff;
+}
+
+.update-dot.visible {
+  display: block;
 }
 
 /* Rendered inline in #results by renderSettingsMode (main.ts) — see the

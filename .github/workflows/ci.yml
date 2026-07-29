@@ -28,6 +28,20 @@ jobs:
   test:
     runs-on: macos-latest
     steps:
+      # Monitors/logs every outbound network call this job's process tree
+      # makes (audit mode, non-blocking). `cargo test --workspace` runs
+      # arbitrary build.rs/proc-macro code from every crate in the
+      # dependency tree — this is the same class of exfiltration channel a
+      # compromised dependency used in the tj-actions/changed-files supply
+      # chain attack (2025) and that self-propagating npm worms (e.g.
+      # Shai-Hulud) use to phone home with stolen tokens. Audit mode alone
+      # won't block an exfil attempt, but it surfaces exactly which process
+      # called out to where in the job summary, which "nothing happened,
+      # build just passed" silently would not.
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           # cargo build.rs scripts and proc-macros run arbitrary code
@@ -63,6 +77,10 @@ jobs:
   audit:
     runs-on: macos-latest
     steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
