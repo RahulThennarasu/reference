@@ -42,11 +42,19 @@ the real, narrower gap: `search` already calls `synthesize()`, but only for gram
 
 shipped as `mcp__reference-mcp__explain` (tool wiring in `mcp/src/main.rs`, no core changes needed — reuses `hybrid_search` and `synthesize` as-is): same extractive citation mechanism as `search`, but unconditional, no phrasing gate. plus a `/explain <query>` command mirroring `/refsearch`. see `docs/mcp-agent-usage.md` for the full tool reference.
 
-## idea 5: push instead of pull
+## idea 5: push instead of pull — researched, not built
 
 `watcher.rs` already runs continuously per watched folder. add a subscription: notify when a chunk semantically related to what's being worked on changes on disk elsewhere, mid-session.
 
 turns the tool from a stateless query an agent has to remember to call into something with standing value for the life of the session.
+
+verified against `rmcp` 2.2.0's own source (`docs.rs` + the vendored crate, per this project's own rule on verifying crate claims) before writing any code, and found two real problems, not just implementation effort:
+
+1. **the spec-correct push primitive is a bigger subsystem than it looks.** `notifications/resources/updated` exists in `rmcp` 2.2.0 (`model.rs`'s `ResourceUpdatedNotification`, `Peer::notify_resource_updated`), but it's built on MCP's Resources concept, which `reference-mcp` doesn't implement at all today — no `list_resources`, no `read_resource`, no URI scheme for a chunk. Wiring idea 5 onto this means building that subsystem first, not just adding a tool.
+2. **the simpler primitive is deprecated.** `rmcp`'s other server-push option, `notifications/message` (`LoggingMessageNotification`), is marked `#[deprecated(since = "2.0.0")]` in the crate itself, per SEP-2577, "will be removed in a future release." building on it now would mean shipping on an API the crate's own source says is going away — the opposite of this project's "verify current, don't assume" discipline.
+3. **unresolved either way**: whether Claude Code's MCP client actually surfaces a server-pushed notification into an *active* agent session (vs. a tool call's synchronous response, which is the only delivery path every other tool here relies on) is a client-side behavior this repo can't verify by reading its own dependencies.
+
+net: real push notifications are buildable in principle (`rmcp` supports the wire protocol), but doing it on the non-deprecated path means building a Resources subsystem this server has no other use for, and the payoff is unverified regardless of which primitive gets used. left undone rather than building on a deprecated API or a speculative subsystem. `find_similar`/`check_doc_drift` already cover the pull-based version of "did anything related change" for now.
 
 ## why these and not a second search tool
 
