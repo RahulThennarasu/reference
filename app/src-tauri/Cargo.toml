@@ -1,6 +1,6 @@
 [package]
 name = "reference-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "reference: local file indexing and semantic search"
 authors = ["you"]
 edition = "2021"
