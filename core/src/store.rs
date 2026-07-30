@@ -435,8 +435,48 @@ impl Store {
         k: usize,
         folder: Option<&str>,
     ) -> Result<Vec<HybridHit>> {
+        let target_embedding = self.chunk_embedding(path, start_line).await?;
+        let mut hits = self.scan_by_embedding(&target_embedding, path, start_line, folder).await?;
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
+    /// Checks whether a doc chunk still matches the code it describes.
+    /// Markdown isn't chunked at function granularity (see
+    /// `docs/code-aware-chunking.md`), so a doc file's chunks always carry
+    /// `chunk_kind = "file"` — that's the signal used here to tell "the doc
+    /// itself" apart from "actual code constructs" among the candidates,
+    /// so a prose doc chunk is compared only against real functions/types/
+    /// etc., not against other prose that happens to share vocabulary.
+    /// `likely_stale` is a threshold read on the top match's score, not a
+    /// guarantee: a low score means nothing in the index reads as
+    /// semantically close to this doc chunk anymore, which is what code
+    /// drifting out from under stale documentation looks like.
+    pub async fn check_doc_drift(
+        &self,
+        path: &str,
+        start_line: i32,
+        k: usize,
+        stale_threshold: f32,
+        folder: Option<&str>,
+    ) -> Result<(Vec<HybridHit>, bool)> {
+        let target_embedding = self.chunk_embedding(path, start_line).await?;
+        let mut hits = self.scan_by_embedding(&target_embedding, path, start_line, folder).await?;
+        hits.retain(|h| h.chunk_kind != "file");
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(k);
+        let likely_stale = hits.first().map(|h| h.score < stale_threshold).unwrap_or(true);
+        Ok((hits, likely_stale))
+    }
+
+    /// Looks up the stored embedding for the chunk at `path` + `start_line`
+    /// — shared by every "compare this chunk against the rest of the index"
+    /// tool (`find_similar`, `check_doc_drift`) instead of each re-querying
+    /// for it.
+    async fn chunk_embedding(&self, path: &str, start_line: i32) -> Result<Vec<f32>> {
         let escaped_path = path.replace('\'', "''");
-        let target_batches = self
+        let batches = self
             .table
             .query()
             .select(Select::Columns(vec!["embedding".to_string()]))
@@ -446,7 +486,7 @@ impl Store {
             .try_collect::<Vec<_>>()
             .await?;
 
-        let target_embedding: Vec<f32> = target_batches
+        batches
             .iter()
             .find(|b| b.num_rows() > 0)
             .map(|b| {
@@ -457,8 +497,22 @@ impl Store {
                 let row = embeddings.value(0);
                 Ok::<Vec<f32>, anyhow::Error>(row.as_primitive::<Float32Type>().values().to_vec())
             })
-            .context("no chunk found at that path/start_line")??;
+            .context("no chunk found at that path/start_line")?
+    }
 
+    /// Scores every indexed chunk against `target_embedding` by plain dot
+    /// product (both sides already L2-normalized), excluding the chunk at
+    /// `exclude_path` + `exclude_start_line` — a chunk is always its own
+    /// top match at similarity 1.0, so the source chunk is dropped by
+    /// identity rather than by score. Returned unsorted/untruncated; callers
+    /// apply their own filtering, sort, and `k` limit on top of this.
+    async fn scan_by_embedding(
+        &self,
+        target_embedding: &[f32],
+        exclude_path: &str,
+        exclude_start_line: i32,
+        folder: Option<&str>,
+    ) -> Result<Vec<HybridHit>> {
         let mut query = self.table.query().select(Select::Columns(vec![
             "path".to_string(),
             "start_line".to_string(),
@@ -507,13 +561,13 @@ impl Store {
             for i in 0..batch.num_rows() {
                 let row_path = paths.value(i).to_string();
                 let row_start_line = start_lines.value(i);
-                if row_path == path && row_start_line == start_line {
+                if row_path == exclude_path && row_start_line == exclude_start_line {
                     continue;
                 }
 
                 let row_embedding = embeddings.value(i);
                 let row_embedding = row_embedding.as_primitive::<Float32Type>().values();
-                let score = dot(&target_embedding, row_embedding).max(0.0);
+                let score = dot(target_embedding, row_embedding).max(0.0);
 
                 hits.push(HybridHit {
                     path: row_path,
@@ -528,8 +582,6 @@ impl Store {
             }
         }
 
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        hits.truncate(k);
         Ok(hits)
     }
 
@@ -725,6 +777,42 @@ fn render_widget(name: &str) -> String {
             "the source chunk must not appear in its own similarity results"
         );
         assert_eq!(hits[0].name, "load_settings", "the other file-reading function should rank closer than the unrelated widget renderer");
+    }
+
+    #[tokio::test]
+    async fn check_doc_drift_flags_a_doc_chunk_with_no_close_code_match() {
+        let embedder = embedder().await;
+        let (_dir, store) = open_temp_store().await;
+
+        // A doc chunk (markdown falls back to one whole-file "file" chunk,
+        // see chunk::chunk_or_whole_file) that closely describes real code
+        // also present in the index.
+        let doc = "# config loading\n\nthis project reads a toml configuration file from disk on startup and validates its fields before use.";
+        let doc_records = records_for(embedder, "md", doc).await;
+        assert_eq!(doc_records.len(), 1, "markdown has no code-aware chunker, should fall back to one file chunk");
+        store.replace_chunks("/proj/docs/config.md", doc_records).await.unwrap();
+
+        let code = r#"
+fn parse_config(path: &str) -> bool {
+    // reads a toml config file from disk and validates its fields
+    path.ends_with(".toml")
+}
+"#;
+        store.replace_chunks("/proj/lib.rs", records_for(embedder, "rs", code).await).await.unwrap();
+
+        let (matches, likely_stale) = store.check_doc_drift("/proj/docs/config.md", 1, 5, 0.3, None).await.unwrap();
+        assert!(!matches.is_empty(), "the doc should still match the code it describes");
+        assert_eq!(matches[0].name, "parse_config");
+        assert!(!likely_stale, "a doc whose top code match scores above the threshold should not be flagged");
+
+        // An unrelated doc with nothing matching in the index at all should
+        // come back with a low top score and get flagged.
+        let unrelated_doc = "# unrelated topic\n\nthis document discusses quarterly marketing budget allocation across regions.";
+        let unrelated_records = records_for(embedder, "md", unrelated_doc).await;
+        store.replace_chunks("/proj/docs/marketing.md", unrelated_records).await.unwrap();
+
+        let (_matches, likely_stale) = store.check_doc_drift("/proj/docs/marketing.md", 1, 5, 0.3, None).await.unwrap();
+        assert!(likely_stale, "a doc chunk with no semantically close code should be flagged as likely stale");
     }
 
     #[tokio::test]

@@ -46,7 +46,7 @@ this app is the real version: an actual local index of your files, kept current 
 - code-aware chunking: search and cite exact functions/classes, not just whole files
 - answer synthesis with source citations, linking back to the actual file, code citations are syntax-highlighted with a high-contrast palette tuned for the app's dark theme
 - a "send to agent" button on every result and citation: copies a formatted query + code/line-range context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent (claude code, codex, etc.) they're using
-- an MCP server (`mcp/`) exposing two read-only tools over the same index, for agents to query directly mid-task instead of shelling out to a CLI: `search` for natural-language lookup, `find_similar` for finding near-duplicate chunks given one already found. `cargo build -p reference-mcp` once, then register it yourself with `claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp` — see `docs/mcp-agent-usage.md` for the full setup
+- an MCP server (`mcp/`) exposing three read-only tools over the same index, for agents to query directly mid-task instead of shelling out to a CLI: `search` for natural-language lookup, `find_similar` for finding near-duplicate chunks given one already found, `check_doc_drift` for flagging a doc chunk that no longer scores close to the code it describes. `cargo build -p reference-mcp` once, then register it yourself with `claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp` — see `docs/mcp-agent-usage.md` for the full setup
 
 ## explicitly out of scope for v1
 
@@ -65,7 +65,7 @@ this app is the real version: an actual local index of your files, kept current 
 
 ## current status
 
-watch, embed, store, and hybrid search all work end-to-end through the tauri app, backed by one index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, javascript, go, java, c, and c++ (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result. the `reference-cli` binary (a shell-out-and-parse-json interface for coding agents) has been removed in favor of an MCP server (`mcp/`, package `reference-mcp`) exposing the same search plus a `find_similar` near-duplicate lookup over the same index, keeping the embedding model warm across calls instead of reloading it per invocation like the old CLI did.
+watch, embed, store, and hybrid search all work end-to-end through the tauri app, backed by one index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, javascript, go, java, c, and c++ (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result. the `reference-cli` binary (a shell-out-and-parse-json interface for coding agents) has been removed in favor of an MCP server (`mcp/`, package `reference-mcp`) exposing the same search plus a `find_similar` near-duplicate lookup and a `check_doc_drift` staleness check over the same index, keeping the embedding model warm across calls instead of reloading it per invocation like the old CLI did.
 
 everything lives under `~/.reference/`: `watched_folders.json` is the plain-text list of folders you've added via the app (⌘7), `index/` is the actual lancedb table (paths + chunks + embeddings). removing a folder from the app (the x button) doesn't just stop watching it — it purges every already-indexed row for that folder from `index/` too, so nothing stale is left searchable after you remove it.
 
@@ -83,4 +83,4 @@ claude mcp add --scope user reference-mcp -- /path/to/reference.app/Contents/Mac
 
 (on a normal install this would be `/Applications/reference.app/Contents/MacOS/reference-mcp`; adjust the path to wherever your build landed, e.g. `target/debug/bundle/macos/reference.app/...` for a local dev build).
 
-verify with `claude mcp list` — should show `reference-mcp ✔ Connected`. it only searches folders you've already added to the app (⌘7); see `docs/mcp-agent-usage.md` for the full tool reference, the `/refsearch` and `/findsimilar` commands, and caveats.
+verify with `claude mcp list` — should show `reference-mcp ✔ Connected`. it only searches folders you've already added to the app (⌘7); see `docs/mcp-agent-usage.md` for the full tool reference, the `/refsearch`, `/findsimilar`, and `/checkdocdrift` commands, and caveats.

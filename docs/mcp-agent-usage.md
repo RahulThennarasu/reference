@@ -1,6 +1,6 @@
 # reference-mcp for coding agents
 
-`reference-mcp` is the agent-facing side of `reference` — the successor to the removed `reference-cli`. It's an MCP server exposing two read-only tools, `search` and `find_similar`, over the same index the desktop app watches and writes (`~/.reference/index`).
+`reference-mcp` is the agent-facing side of `reference` — the successor to the removed `reference-cli`. It's an MCP server exposing three read-only tools, `search`, `find_similar`, and `check_doc_drift`, over the same index the desktop app watches and writes (`~/.reference/index`).
 
 ## why this exists (and why not the old CLI)
 
@@ -86,6 +86,32 @@ Use this after `search` has already located a chunk, to answer a different quest
 ## `/findsimilar` — explicit invocation
 
 Same reasoning as `/refsearch` below: `.claude/commands/findsimilar.md` calls `mcp__reference-mcp__find_similar` directly, bypassing tool-choice uncertainty. Usage: `/findsimilar <path> <start_line>`, e.g. `/findsimilar core/src/chunk.rs 678`. Passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, same auto-scoping as `/refsearch`.
+
+## the `check_doc_drift` tool
+
+Input:
+```json
+{ "path": "/Users/you/Documents/GitHub/reference/docs/mcp-agent-usage.md", "start_line": 1, "top_k": 5, "stale_threshold": 0.35, "folder": "/Users/you/Documents/GitHub/reference" }
+```
+- `path` / `start_line`: identify the doc chunk to check — usually taken from a prior `search` hit. Markdown has no code-aware chunker (see `docs/code-aware-chunking.md`), so a doc file's chunks always fall back to one whole-file chunk at `start_line: 1`.
+- `top_k`: optional, defaults to 5.
+- `stale_threshold`: optional, defaults to 0.35. Score below which the top matching code chunk is treated as evidence the doc has drifted — same dot-product scale as `find_similar`'s scores, not a probability.
+- `folder`: optional, same reasoning as `search`'s `folder` param.
+
+Output (JSON text content):
+```json
+{
+  "results": [
+    { "path": "/abs/path/to/file.rs", "start_line": 154, "end_line": 251, "chunk_kind": "function", "score": 0.61, "content": "pub async fn hybrid_search(...) { ... }" }
+  ],
+  "likely_stale": false
+}
+```
+Built on the same mechanism as `find_similar` (the doc chunk's own stored embedding, scored by dot product against the rest of the index), with one filter added: candidates with `chunk_kind = "file"` are excluded, so a prose doc chunk is compared only against actual code constructs (functions, types, ...) and never against other doc files that happen to share vocabulary. `likely_stale` reads the top result's score against `stale_threshold` — it's a heuristic signal ("nothing in the index still reads as close to this doc"), not a guarantee the doc is wrong.
+
+## `/checkdocdrift` — explicit invocation
+
+Same reasoning as `/refsearch` below: `.claude/commands/checkdocdrift.md` calls `mcp__reference-mcp__check_doc_drift` directly. Usage: `/checkdocdrift <path> <start_line>`, e.g. `/checkdocdrift docs/mcp-agent-usage.md 1`. Passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, same auto-scoping as `/refsearch`.
 
 ## `/refsearch` — explicit invocation
 

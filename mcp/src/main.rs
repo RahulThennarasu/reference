@@ -77,6 +77,28 @@ struct FindSimilarParams {
     folder: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CheckDocDriftParams {
+    /// Absolute path of the doc file containing the chunk to check —
+    /// usually the `path` of a hit already returned by `search`.
+    path: String,
+    /// The chunk's `start_line`, also usually taken straight from a prior
+    /// `search` hit. Markdown files fall back to one whole-file chunk (no
+    /// code-aware chunker for prose), so this is almost always `1` for a
+    /// doc file.
+    start_line: i32,
+    /// How many of the closest matching code chunks to return. Defaults to 5.
+    top_k: Option<usize>,
+    /// Score below which the top match is considered evidence the doc has
+    /// drifted from the code it describes. Defaults to 0.35 — the same
+    /// dot-product scale `find_similar` and `search`'s semantic component
+    /// use, not a probability.
+    stale_threshold: Option<f32>,
+    /// Scope candidates to one watched folder (absolute path). Omit to
+    /// search everything this machine has opted into watching.
+    folder: Option<String>,
+}
+
 #[derive(Serialize)]
 struct JsonCitation {
     path: String,
@@ -210,6 +232,42 @@ impl ReferenceServer {
             .collect();
 
         let body = json!({ "results": results });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            body.to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Check whether a doc chunk (identified by path + start_line, e.g. from a prior search hit) still matches the code it describes. Returns the closest matching code chunks in the index and whether the top match scores below a staleness threshold. Use this to catch documentation that no longer reflects the current implementation, not to find code by text."
+    )]
+    async fn check_doc_drift(
+        &self,
+        Parameters(CheckDocDriftParams { path, start_line, top_k, stale_threshold, folder }): Parameters<
+            CheckDocDriftParams,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        let k = top_k.unwrap_or(5);
+        let threshold = stale_threshold.unwrap_or(0.35);
+
+        let (hits, likely_stale) = self
+            .store
+            .check_doc_drift(&path, start_line, k, threshold, folder.as_deref())
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let results: Vec<JsonHit> = hits
+            .iter()
+            .map(|h| JsonHit {
+                path: h.path.clone(),
+                start_line: h.start_line,
+                end_line: h.end_line,
+                chunk_kind: h.chunk_kind.clone(),
+                score: h.score,
+                content: h.content.clone(),
+            })
+            .collect();
+
+        let body = json!({ "results": results, "likely_stale": likely_stale });
         Ok(CallToolResult::success(vec![ContentBlock::text(
             body.to_string(),
         )]))
@@ -441,6 +499,80 @@ mod tests {
             "source chunk must not appear in its own results: {results:?}"
         );
         assert!(results[0]["content"].as_str().unwrap().contains("load_settings"));
+    }
+
+    #[tokio::test]
+    async fn check_doc_drift_flags_docs_with_no_close_code_match() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        server
+            .store
+            .replace_chunks(
+                "/proj/docs/config.md",
+                records_for(
+                    &embedder,
+                    "md",
+                    "# config loading\n\nthis project reads a toml configuration file from disk on startup and validates its fields before use.",
+                )
+                .await,
+            )
+            .await
+            .unwrap();
+        server
+            .store
+            .replace_chunks(
+                "/proj/lib.rs",
+                records_for(
+                    &embedder,
+                    "rs",
+                    "fn parse_config(path: &str) -> bool { path.ends_with(\".toml\") }",
+                )
+                .await,
+            )
+            .await
+            .unwrap();
+
+        let matching = server
+            .check_doc_drift(Parameters(CheckDocDriftParams {
+                path: "/proj/docs/config.md".to_string(),
+                start_line: 1,
+                top_k: None,
+                stale_threshold: Some(0.3),
+                folder: None,
+            }))
+            .await
+            .expect("check_doc_drift must succeed");
+        let matching_body = extract_json(&matching);
+        assert_eq!(matching_body["likely_stale"], false);
+        assert!(matching_body["results"][0]["content"].as_str().unwrap().contains("parse_config"));
+
+        server
+            .store
+            .replace_chunks(
+                "/proj/docs/marketing.md",
+                records_for(
+                    &embedder,
+                    "md",
+                    "# unrelated topic\n\nthis document discusses quarterly marketing budget allocation across regions.",
+                )
+                .await,
+            )
+            .await
+            .unwrap();
+
+        let unrelated = server
+            .check_doc_drift(Parameters(CheckDocDriftParams {
+                path: "/proj/docs/marketing.md".to_string(),
+                start_line: 1,
+                top_k: None,
+                stale_threshold: Some(0.3),
+                folder: None,
+            }))
+            .await
+            .expect("check_doc_drift must succeed");
+        let unrelated_body = extract_json(&unrelated);
+        assert_eq!(unrelated_body["likely_stale"], true);
     }
 
     #[tokio::test]

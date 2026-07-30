@@ -18,11 +18,13 @@ useful mid-edit, not just at orientation: "you're about to write logic that alre
 
 shipped as `mcp__reference-mcp__find_similar` (`Store::find_similar` in `core/src/store.rs`, tool wiring in `mcp/src/main.rs`), plus a `/findsimilar <path> <start_line>` command mirroring `/refsearch`. see `docs/mcp-agent-usage.md` for the full tool reference.
 
-## idea 2: stale doc check
+## idea 2: stale doc check — implemented
 
 docs and code are both already chunked and embedded. given a doc chunk, compare its embedding against the code it describes and flag drift past some distance threshold.
 
 answers "is this doc still true," a question that needs re-asking every time code changes, not once per session.
+
+shipped as `mcp__reference-mcp__check_doc_drift` (`Store::check_doc_drift` in `core/src/store.rs`, tool wiring in `mcp/src/main.rs`), plus a `/checkdocdrift <path> <start_line>` command mirroring `/findsimilar`. built on the same embedding-scan mechanism as `find_similar`, filtered to exclude other doc chunks (`chunk_kind = "file"`) so a prose doc only gets compared against actual code constructs. see `docs/mcp-agent-usage.md` for the full tool reference.
 
 ## idea 3: cross-repo recall
 
