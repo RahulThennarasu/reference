@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.pattern // empty' | { read -r q; if [ -z \"$q\" ]; then echo '{}'; elif echo \"$q\" | grep -qE '^[A-Za-z0-9_.:/-]+$'; then echo '{}'; else jq -n --arg q \"$q\" '{hookSpecificOutput:{hookEventName:\"PreToolUse\", additionalContext:(\"grep pattern \\\"\" + $q + \"\\\" looks intent/behavior-shaped, not a known literal identifier -- this project (reference) exposes mcp__reference-mcp__search and mcp__reference-mcp__explain for exactly that case (see the semantic code search section in CLAUDE.md). consider those first.\")}}'; fi; } 2>/dev/null || true",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(grep *)",
+            "command": "jq -r '.tool_input.command // empty' | { read -r c; if [ -z \"$c\" ]; then echo '{}'; else jq -n --arg c \"$c\" '{hookSpecificOutput:{hookEventName:\"PreToolUse\", additionalContext:(\"about to run grep via bash (\" + $c + \") -- this project (reference) exposes mcp__reference-mcp__search and mcp__reference-mcp__explain for behavior/intent-shaped lookups (see CLAUDE.md). consider those first if you do not already know the exact identifier/string.\")}}'; fi; } 2>/dev/null || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; if [ -z \"$f\" ]; then echo '{}'; elif printf '%s' \"$f\" | grep -qiE '\\.md$'; then jq -n --arg f \"$f\" '{hookSpecificOutput:{hookEventName:\"PostToolUse\", additionalContext:(\"just edited doc file \" + $f + \" -- consider mcp__reference-mcp__check_doc_drift on the relevant chunk to confirm it still matches the code it describes.\")}}'; else jq -n --arg f \"$f\" '{hookSpecificOutput:{hookEventName:\"PostToolUse\", additionalContext:(\"just edited \" + $f + \" -- consider mcp__reference-mcp__find_similar on the changed chunk to catch duplicated/near-duplicate logic elsewhere in the index before moving on.\")}}'; fi; } 2>/dev/null || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
