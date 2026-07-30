@@ -417,6 +417,122 @@ impl Store {
         Ok(hits)
     }
 
+    /// Finds chunks whose embedding is closest to the chunk at `path` +
+    /// `start_line` — "what else in the index looks like this," not "what
+    /// matches this text." No query embedding to compute: the target
+    /// chunk's own stored vector is looked up first, then reused as the
+    /// query vector against every other row's embedding, same dot-product
+    /// scoring `hybrid_search` uses for its semantic component alone (no
+    /// fuzzy/content-overlap blend here — there's no query text to match
+    /// against a filename or content, only a vector to compare against
+    /// other vectors). The source chunk itself is excluded from its own
+    /// results by path + start_line, not by score, since a chunk is always
+    /// its own top match at similarity 1.0.
+    pub async fn find_similar(
+        &self,
+        path: &str,
+        start_line: i32,
+        k: usize,
+        folder: Option<&str>,
+    ) -> Result<Vec<HybridHit>> {
+        let escaped_path = path.replace('\'', "''");
+        let target_batches = self
+            .table
+            .query()
+            .select(Select::Columns(vec!["embedding".to_string()]))
+            .only_if(format!("path = '{escaped_path}' AND start_line = {start_line}"))
+            .execute()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let target_embedding: Vec<f32> = target_batches
+            .iter()
+            .find(|b| b.num_rows() > 0)
+            .map(|b| {
+                let embeddings = b
+                    .column_by_name("embedding")
+                    .context("missing embedding column")?
+                    .as_fixed_size_list();
+                let row = embeddings.value(0);
+                Ok::<Vec<f32>, anyhow::Error>(row.as_primitive::<Float32Type>().values().to_vec())
+            })
+            .context("no chunk found at that path/start_line")??;
+
+        let mut query = self.table.query().select(Select::Columns(vec![
+            "path".to_string(),
+            "start_line".to_string(),
+            "end_line".to_string(),
+            "chunk_kind".to_string(),
+            "content".to_string(),
+            "name".to_string(),
+            "truncated".to_string(),
+            "embedding".to_string(),
+        ]));
+        if let Some(folder) = folder {
+            let folder = folder.trim_end_matches('/').replace('\'', "''");
+            query = query.only_if(format!("path LIKE '{folder}/%'"));
+        }
+        let batches = query.execute().await?.try_collect::<Vec<_>>().await?;
+
+        let mut hits = Vec::new();
+        for batch in &batches {
+            let paths = batch.column_by_name("path").context("missing path column")?.as_string::<i32>();
+            let start_lines = batch
+                .column_by_name("start_line")
+                .context("missing start_line column")?
+                .as_primitive::<arrow_array::types::Int32Type>();
+            let end_lines = batch
+                .column_by_name("end_line")
+                .context("missing end_line column")?
+                .as_primitive::<arrow_array::types::Int32Type>();
+            let chunk_kinds = batch
+                .column_by_name("chunk_kind")
+                .context("missing chunk_kind column")?
+                .as_string::<i32>();
+            let contents = batch
+                .column_by_name("content")
+                .context("missing content column")?
+                .as_string::<i32>();
+            let names = batch.column_by_name("name").context("missing name column")?.as_string::<i32>();
+            let truncated_flags = batch
+                .column_by_name("truncated")
+                .context("missing truncated column")?
+                .as_boolean();
+            let embeddings = batch
+                .column_by_name("embedding")
+                .context("missing embedding column")?
+                .as_fixed_size_list();
+
+            for i in 0..batch.num_rows() {
+                let row_path = paths.value(i).to_string();
+                let row_start_line = start_lines.value(i);
+                if row_path == path && row_start_line == start_line {
+                    continue;
+                }
+
+                let row_embedding = embeddings.value(i);
+                let row_embedding = row_embedding.as_primitive::<Float32Type>().values();
+                let score = dot(&target_embedding, row_embedding).max(0.0);
+
+                hits.push(HybridHit {
+                    path: row_path,
+                    content: contents.value(i).to_string(),
+                    score,
+                    start_line: row_start_line,
+                    end_line: end_lines.value(i),
+                    chunk_kind: chunk_kinds.value(i).to_string(),
+                    name: names.value(i).to_string(),
+                    truncated: truncated_flags.value(i),
+                });
+            }
+        }
+
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
     /// Deletes every indexed row whose path is under `folder`. `merge_insert`
     /// only ever adds/updates rows, so without this, un-watching a folder
     /// would stop it from being *updated* but leave everything already
@@ -572,6 +688,43 @@ fn keep_me() -> i32 { 1 }
         );
         assert!(store.find_by_name("delete_me", None).await.unwrap().is_empty());
         assert_eq!(store.find_by_name("keep_me", None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn find_similar_excludes_self_and_ranks_by_embedding_distance() {
+        let embedder = embedder().await;
+        let (_dir, store) = open_temp_store().await;
+
+        let source = r#"
+fn parse_config(path: &str) -> bool {
+    // reads a toml config file from disk and validates its fields
+    path.ends_with(".toml")
+}
+
+fn load_settings(path: &str) -> bool {
+    // reads a json settings file from disk and validates its fields
+    path.ends_with(".json")
+}
+
+fn render_widget(name: &str) -> String {
+    // draws a ui widget to the screen given its name
+    format!("<widget {name}>")
+}
+"#;
+        let records = records_for(embedder, "rs", source).await;
+        store.replace_chunks("/proj/lib.rs", records).await.unwrap();
+
+        let target = store.find_by_name("parse_config", None).await.unwrap();
+        assert_eq!(target.len(), 1);
+        let target_start_line = target[0].start_line;
+
+        let hits = store.find_similar("/proj/lib.rs", target_start_line, 5, None).await.unwrap();
+
+        assert!(
+            hits.iter().all(|h| !(h.path == "/proj/lib.rs" && h.start_line == target_start_line)),
+            "the source chunk must not appear in its own similarity results"
+        );
+        assert_eq!(hits[0].name, "load_settings", "the other file-reading function should rank closer than the unrelated widget renderer");
     }
 
     #[tokio::test]

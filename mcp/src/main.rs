@@ -60,6 +60,23 @@ struct JsonHit {
     content: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct FindSimilarParams {
+    /// Absolute path of the file containing the chunk to compare against —
+    /// usually the `path` of a hit already returned by `search`.
+    path: String,
+    /// The chunk's `start_line`, also usually taken straight from a prior
+    /// `search` hit. Identifies which chunk in the file to compare against,
+    /// since a file is chunked into multiple rows (see
+    /// docs/code-aware-chunking.md), not indexed as one unit.
+    start_line: i32,
+    /// How many similar chunks to return. Defaults to 5.
+    top_k: Option<usize>,
+    /// Scope candidates to one watched folder (absolute path). Omit to
+    /// search everything this machine has opted into watching.
+    folder: Option<String>,
+}
+
 #[derive(Serialize)]
 struct JsonCitation {
     path: String,
@@ -160,6 +177,39 @@ impl ReferenceServer {
             .collect();
 
         let body = json!({ "results": results, "citations": citations });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            body.to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Find chunks whose embedding is closest to an already-indexed chunk (identified by path + start_line, e.g. from a prior search hit). Use this to catch duplicated or near-duplicate logic elsewhere in the index before writing new code, not to search by text."
+    )]
+    async fn find_similar(
+        &self,
+        Parameters(FindSimilarParams { path, start_line, top_k, folder }): Parameters<FindSimilarParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let k = top_k.unwrap_or(5);
+
+        let hits = self
+            .store
+            .find_similar(&path, start_line, k, folder.as_deref())
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let results: Vec<JsonHit> = hits
+            .iter()
+            .map(|h| JsonHit {
+                path: h.path.clone(),
+                start_line: h.start_line,
+                end_line: h.end_line,
+                chunk_kind: h.chunk_kind.clone(),
+                score: h.score,
+                content: h.content.clone(),
+            })
+            .collect();
+
+        let body = json!({ "results": results });
         Ok(CallToolResult::success(vec![ContentBlock::text(
             body.to_string(),
         )]))
@@ -350,6 +400,47 @@ mod tests {
             results.iter().all(|r| r["path"].as_str().unwrap().starts_with("/watched/proj_a/")),
             "folder scoping must exclude every hit from other watched folders: {results:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn find_similar_excludes_the_source_chunk_and_ranks_the_related_one_first() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        server
+            .store
+            .replace_chunks(
+                "/proj/lib.rs",
+                records_for(
+                    &embedder,
+                    "rs",
+                    "fn parse_config(path: &str) -> bool { path.ends_with(\".toml\") }\n\nfn load_settings(path: &str) -> bool { path.ends_with(\".json\") }\n\nfn render_widget(name: &str) -> String { format!(\"<widget {name}>\") }",
+                )
+                .await,
+            )
+            .await
+            .unwrap();
+
+        let target = server.store.find_by_name("parse_config", None).await.unwrap();
+        let start_line = target[0].start_line;
+
+        let result = server
+            .find_similar(Parameters(FindSimilarParams {
+                path: "/proj/lib.rs".to_string(),
+                start_line,
+                top_k: None,
+                folder: None,
+            }))
+            .await
+            .expect("find_similar must succeed");
+
+        let body = extract_json(&result);
+        let results = body["results"].as_array().unwrap();
+        assert!(
+            results.iter().all(|r| !(r["path"] == "/proj/lib.rs" && r["start_line"] == start_line)),
+            "source chunk must not appear in its own results: {results:?}"
+        );
+        assert!(results[0]["content"].as_str().unwrap().contains("load_settings"));
     }
 
     #[tokio::test]
