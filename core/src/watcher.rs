@@ -9,9 +9,24 @@ use ignore::WalkBuilder;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use walkdir::WalkDir;
 
+use serde::Serialize;
+
 use crate::chunk;
 use crate::embedding::Embedder;
 use crate::store::{ChunkRecord, Store};
+
+/// Snapshot of how far the initial scan of a watched folder has gotten.
+/// `done` is the signal a progress bar should key off of to know indexing
+/// actually finished, not `indexed == total`: the file count used for
+/// `total` is taken before the scan starts (`count_indexable_files`), so a
+/// file created/deleted mid-scan can make `indexed` over/undershoot `total`
+/// slightly — `done` is set exactly once, after the scan loop truly exits.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct IndexProgress {
+    pub indexed: usize,
+    pub total: usize,
+    pub done: bool,
+}
 
 /// Reads a file as UTF-8 text. Returns `None` for files that aren't valid
 /// text (binaries, etc.) so they're silently skipped rather than indexed
@@ -128,8 +143,12 @@ pub async fn watch(
     embedder: &Embedder,
     store: &Store,
     stop: Arc<AtomicBool>,
+    total_files: usize,
+    on_progress: impl Fn(IndexProgress) + Send + Sync + 'static,
 ) -> Result<()> {
     println!("indexing existing files under {}", folder.display());
+    on_progress(IndexProgress { indexed: 0, total: total_files, done: false });
+    let mut indexed = 0usize;
     for entry in WalkBuilder::new(folder)
         // See `count_indexable_files`'s comment: without this, `.gitignore`
         // is silently skipped for any watched folder that isn't itself a
@@ -145,7 +164,17 @@ pub async fn watch(
         if let Err(e) = index_file(embedder, store, entry.path()).await {
             eprintln!("failed to index {}: {e}", entry.path().display());
         }
+        indexed += 1;
+        // Clamped: `total_files` is counted before the walk starts, so a
+        // file created mid-scan can otherwise push `indexed` past it and
+        // report a progress bar over 100%.
+        on_progress(IndexProgress { indexed: indexed.min(total_files), total: total_files, done: false });
     }
+
+    // `done: true` is the actual completion signal (see `IndexProgress`'s
+    // doc comment) — fired once, after the scan loop has fully exited,
+    // regardless of whether `indexed` landed exactly on `total_files`.
+    on_progress(IndexProgress { indexed: total_files, total: total_files, done: true });
 
     let gitignore = build_gitignore(folder);
 
@@ -254,7 +283,8 @@ mod tests {
     ) -> std::thread::JoinHandle<Result<()>> {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("watch test runtime");
-            rt.block_on(watch(&path, embedder, &store, stop))
+            let total = count_indexable_files(&path, usize::MAX);
+            rt.block_on(watch(&path, embedder, &store, stop, total, |_| {}))
         })
     }
 

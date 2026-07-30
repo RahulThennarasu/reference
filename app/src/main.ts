@@ -309,6 +309,9 @@ let scopeBtnEl: HTMLButtonElement | null;
 let scopeLabelEl: HTMLElement | null;
 let settingsBtnEl: HTMLButtonElement | null;
 let updateDotEl: HTMLElement | null;
+let indexProgressEl: HTMLElement | null;
+let indexProgressBarEl: HTMLElement | null;
+let indexProgressLabelEl: HTMLElement | null;
 
 // Set once `checkForAppUpdate` finds a newer release; null means either no
 // check has completed yet or the app is already current. Held onto (rather
@@ -788,10 +791,16 @@ async function resize() {
   resultsEl.style.flex = "";
   resultsEl.style.height = "";
 
+  // Not part of #results, so its height (when visible) has to be added on
+  // top of COLLAPSED_HEIGHT explicitly, same as #results' own content —
+  // otherwise the window comes out too short and clips the progress bar.
+  const progressHeight =
+    indexProgressEl && !indexProgressEl.hidden ? indexProgressEl.offsetHeight : 0;
+
   const height =
     contentHeight === 0
-      ? COLLAPSED_HEIGHT
-      : Math.min(COLLAPSED_HEIGHT + 12 + contentHeight, MAX_WINDOW_HEIGHT);
+      ? COLLAPSED_HEIGHT + progressHeight
+      : Math.min(COLLAPSED_HEIGHT + progressHeight + 12 + contentHeight, MAX_WINDOW_HEIGHT);
   console.log(
     "resize(): contentHeight =",
     contentHeight,
@@ -977,6 +986,12 @@ async function unwatchFolder(folder: string) {
   } catch (err) {
     console.error("stop_watch failed", err);
   }
+  // Don't wait on the next 500ms poll to notice this folder is gone — the
+  // backend already dropped its progress entry synchronously inside
+  // `stop_watching_folder`, so clear it here too instead of leaving the
+  // bar showing a now-stale snapshot until the next tick happens to land.
+  delete indexingProgress[folder];
+  renderIndexProgress();
   await refreshWatchedFolders();
   renderFolderMode();
 }
@@ -1056,6 +1071,67 @@ function renderFolderMode() {
   }
 
   resize();
+}
+
+const INDEX_PROGRESS_SEGMENTS = 20;
+
+interface IndexProgress {
+  indexed: number;
+  total: number;
+  done: boolean;
+}
+
+// Keyed by folder path, only ever contains folders still mid-scan (see
+// `get_indexing_progress`'s doc comment in lib.rs) — an empty object means
+// every watched folder has finished its initial index.
+let indexingProgress: Record<string, IndexProgress> = {};
+
+// Polled on a plain interval rather than event-driven: it needs to reflect
+// reality even across an app restart mid-scan (the backend has no "resume
+// watching this session's already-open window" event to hook), and the
+// call itself is a cheap mutex read, not a rescan.
+async function pollIndexingProgress() {
+  try {
+    indexingProgress = await invoke<Record<string, IndexProgress>>(
+      "get_indexing_progress",
+    );
+  } catch (err) {
+    console.error("get_indexing_progress failed", err);
+    return;
+  }
+  renderIndexProgress();
+}
+
+function renderIndexProgress() {
+  if (!indexProgressEl || !indexProgressBarEl || !indexProgressLabelEl) return;
+  const entries = Object.values(indexingProgress);
+
+  if (entries.length === 0) {
+    if (!indexProgressEl.hidden) {
+      indexProgressEl.hidden = true;
+      resize();
+    }
+    return;
+  }
+
+  const indexed = entries.reduce((sum, p) => sum + p.indexed, 0);
+  const total = entries.reduce((sum, p) => sum + p.total, 0);
+  const ratio = total > 0 ? indexed / total : 1;
+  const filled = Math.round(ratio * INDEX_PROGRESS_SEGMENTS);
+
+  indexProgressBarEl.innerHTML = "";
+  for (let i = 0; i < INDEX_PROGRESS_SEGMENTS; i++) {
+    const segment = document.createElement("div");
+    segment.className = i < filled ? "segment filled" : "segment";
+    indexProgressBarEl.appendChild(segment);
+  }
+
+  const folderWord = entries.length === 1 ? "folder" : "folders";
+  indexProgressLabelEl.textContent = `indexing ${indexed}/${total} files (${entries.length} ${folderWord})`;
+
+  const wasHidden = indexProgressEl.hidden;
+  indexProgressEl.hidden = false;
+  if (wasHidden) resize();
 }
 
 async function refreshWatchedFolders() {
@@ -1215,6 +1291,9 @@ window.addEventListener("DOMContentLoaded", () => {
   scopeLabelEl = document.querySelector("#scope-label");
   settingsBtnEl = document.querySelector("#settings-btn");
   updateDotEl = document.querySelector("#update-dot");
+  indexProgressEl = document.querySelector("#index-progress");
+  indexProgressBarEl = document.querySelector("#index-progress-bar");
+  indexProgressLabelEl = document.querySelector("#index-progress-label");
 
   copyAllBtnEl?.addEventListener("click", () => copyAllVisible());
 
@@ -1240,6 +1319,8 @@ window.addEventListener("DOMContentLoaded", () => {
   loadRankingWeights();
   loadEmbeddingModels();
   checkForAppUpdate();
+  pollIndexingProgress();
+  setInterval(pollIndexingProgress, 500);
 
   searchInputEl?.addEventListener("input", () => {
     // Typing implicitly abandons the scope picker/settings panel in favor

@@ -63,6 +63,51 @@ body {
   color: rgba(255, 255, 255, 0.32);
 }
 
+/* Shown whenever `get_indexing_progress` reports at least one folder still
+   mid-scan (polled from main.ts) — a visible "not done yet" signal for the
+   gap between adding a folder and it actually being fully searchable,
+   which previously only ever showed up as a terminal log line. */
+/* Higher specificity than the plain `.index-progress` rule below (class +
+   attribute vs. just class), so this wins regardless of source order.
+   Without it, the browser's default `[hidden] { display: none }` UA rule
+   loses to our own `display: flex` below (author styles always beat UA
+   styles), so setting `.hidden = true` in JS silently does nothing. */
+.index-progress[hidden] {
+  display: none;
+}
+
+.index-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 0 22px 14px;
+}
+
+.index-progress-bar {
+  flex: 1;
+  display: flex;
+  gap: 2px;
+  height: 10px;
+}
+
+.index-progress-bar .segment {
+  flex: 1;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.index-progress-bar .segment.filled {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.index-progress-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  white-space: nowrap;
+}
+
 #results {
   list-style: none;
   margin: 0;

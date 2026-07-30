@@ -43,6 +43,15 @@ struct AppState {
     // Query-time only (see `RankingWeights`'s doc comment) — reading this
     // under a lock on every search is cheap, no need for anything fancier.
     ranking_weights: Mutex<RankingWeights>,
+    // Populated by each folder's watch thread via `watcher::watch`'s
+    // progress callback, so the frontend can poll `get_indexing_progress`
+    // and show a real "still scanning" state instead of no signal at all
+    // between "folder added" and "watching for changes" (the old terminal-
+    // only message). `Arc<Mutex<_>>`, not a plain field behind `AppState`'s
+    // own lock, so the callback (which runs on the watch thread, not the
+    // command-handling thread) can hold its own clone independent of every
+    // other field on `AppState`.
+    indexing_progress: Arc<Mutex<HashMap<PathBuf, watcher::IndexProgress>>>,
 }
 
 fn load_watched_folders() -> Vec<String> {
@@ -347,21 +356,21 @@ fn start_watching_folder(state: &AppState, folder: String) -> Result<(), String>
     std::thread::spawn(move || {
         let _ = tx.send(watcher::count_indexable_files(&count_path, MAX_INDEXABLE_FILES));
     });
-    match rx.recv_timeout(COUNT_TIMEOUT) {
+    let total_files = match rx.recv_timeout(COUNT_TIMEOUT) {
         Ok(count) if count > MAX_INDEXABLE_FILES => {
             return Err(format!(
                 "\"{}\" has more than {MAX_INDEXABLE_FILES} indexable files — pick a more specific folder",
                 path.display()
             ));
         }
-        Ok(_) => {}
+        Ok(count) => count,
         Err(_) => {
             return Err(format!(
                 "\"{}\" took too long to scan — pick a more specific folder",
                 path.display()
             ));
         }
-    }
+    };
 
     let stop = Arc::new(AtomicBool::new(false));
     // Held across the check, the thread spawn, and the insert, same as the
@@ -379,6 +388,8 @@ fn start_watching_folder(state: &AppState, folder: String) -> Result<(), String>
     let store = state.store.clone();
     let thread_stop = stop.clone();
     let thread_path = path.clone();
+    let progress_map = state.indexing_progress.clone();
+    let progress_path = path.clone();
     let thread = std::thread::spawn(move || {
         if let Err(e) = std::fs::create_dir_all(&thread_path) {
             eprintln!("failed to create watch folder: {e}");
@@ -391,8 +402,41 @@ fn start_watching_folder(state: &AppState, folder: String) -> Result<(), String>
                 return;
             }
         };
-        if let Err(e) = rt.block_on(watcher::watch(&thread_path, &embedder, &store, thread_stop)) {
+        let on_progress = {
+            let progress_map = progress_map.clone();
+            let progress_path = progress_path.clone();
+            move |p: watcher::IndexProgress| {
+                if let Ok(mut map) = progress_map.lock() {
+                    // Once the scan is actually done, drop the entry rather
+                    // than leaving it parked at indexed==total forever —
+                    // an entry in this map means "still scanning", and a
+                    // finished folder has nothing left to report until it's
+                    // unwatched/re-watched.
+                    if p.done {
+                        map.remove(&progress_path);
+                    } else {
+                        map.insert(progress_path.clone(), p);
+                    }
+                }
+            }
+        };
+        if let Err(e) = rt.block_on(watcher::watch(
+            &thread_path,
+            &embedder,
+            &store,
+            thread_stop,
+            total_files,
+            on_progress,
+        )) {
             eprintln!("watch loop exited with error: {e}");
+        }
+        // Covers both a clean stop (see `stop_watching_folder`, which
+        // removes this entry itself right after signalling) and an
+        // unexpected early exit (a `watch()` error) — either way, no
+        // thread is left updating this folder's entry, so it shouldn't
+        // linger in the map suggesting otherwise.
+        if let Ok(mut map) = progress_map.lock() {
+            map.remove(&progress_path);
         }
     });
 
@@ -427,6 +471,9 @@ async fn stop_watching_folder(state: &AppState, folder: String) -> Result<(), St
         let mut watching = state.watching.lock().map_err(|e| e.to_string())?;
         watching.remove(&path)
     };
+    if let Ok(mut progress) = state.indexing_progress.lock() {
+        progress.remove(&path);
+    }
 
     if let Some(WatchHandle { stop, thread }) = watch_handle {
         stop.store(true, Ordering::Relaxed);
@@ -460,6 +507,24 @@ async fn stop_watch(state: State<'_, AppState>, folder: String) -> Result<(), St
 fn list_watched(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let watching = state.watching.lock().map_err(|e| e.to_string())?;
     Ok(watching.keys().map(|p| p.to_string_lossy().to_string()).collect())
+}
+
+/// Lets the frontend poll whether a watched folder's initial scan has
+/// finished — `watcher::watch` used to only ever print this to the
+/// terminal ("watching X for changes..."), so a search run immediately
+/// after adding a folder could silently miss files still queued for
+/// embedding. Only folders currently mid-scan (or that never got removed
+/// after a `watch()` error, cleaned up by the thread itself) show up here;
+/// a fully-watched folder with no entry means its scan already completed.
+#[tauri::command]
+fn get_indexing_progress(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, watcher::IndexProgress>, String> {
+    let progress = state.indexing_progress.lock().map_err(|e| e.to_string())?;
+    Ok(progress
+        .iter()
+        .map(|(path, p)| (path.to_string_lossy().to_string(), *p))
+        .collect())
 }
 
 #[tauri::command]
@@ -624,6 +689,7 @@ pub fn run() {
         store: Arc::new(store),
         watching: Mutex::new(HashMap::new()),
         ranking_weights: Mutex::new(settings.ranking_weights),
+        indexing_progress: Arc::new(Mutex::new(HashMap::new())),
     };
 
     for folder in load_watched_folders() {
@@ -707,6 +773,7 @@ pub fn run() {
             start_watch,
             stop_watch,
             list_watched,
+            get_indexing_progress,
             home_dir,
             list_dir_suggestions,
             get_ranking_weights,
