@@ -49,6 +49,8 @@ use it first, before grep, whenever a question names no literal string/identifie
 
 tool selection is a model decision, not something CLAUDE.md can force — if grep gets reached for anyway on a behavior/intent question, that's expected, not a bug to fix here. `/refsearch <query>` (`.claude/commands/refsearch.md`) is the explicit, reliable way to invoke the tool directly instead of relying on this instruction being followed; it also passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, scoping the search to the current project by default (see `search`'s `folder` param in `docs/mcp-agent-usage.md`) — an unrelated watched folder that happens to share some vocabulary with the query has outranked the right file before, this is the guard against that.
 
+since prose here can't force tool choice, `.claude/settings.json` also wires up hooks that make the nudge unavoidable rather than optional: a `PreToolUse` hook on `Bash`(grep commands) and the `Grep` tool injects a reminder pointing at `search`/`explain` before the grep runs, and a `PostToolUse` hook on `Edit`/`Write` injects a reminder to run `find_similar` on whatever just changed (`check_doc_drift` instead, for a `.md` file). Neither hook blocks anything — they inject `additionalContext`, not a permission denial — so grep can still run and an edit still lands, but the reminder itself always fires, unlike CLAUDE.md text which a model can silently skip past.
+
 ## explicit non-goals (don't build these without discussing first)
 
 - no cloud sync of the index
