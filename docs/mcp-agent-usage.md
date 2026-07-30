@@ -1,6 +1,6 @@
 # reference-mcp for coding agents
 
-`reference-mcp` is the agent-facing side of `reference` — the successor to the removed `reference-cli`. It's an MCP server exposing three read-only tools, `search`, `find_similar`, and `check_doc_drift`, over the same index the desktop app watches and writes (`~/.reference/index`).
+`reference-mcp` is the agent-facing side of `reference` — the successor to the removed `reference-cli`. It's an MCP server exposing four read-only tools, `search`, `explain`, `find_similar`, and `check_doc_drift`, over the same index the desktop app watches and writes (`~/.reference/index`).
 
 ## why this exists (and why not the old CLI)
 
@@ -113,6 +113,32 @@ Built on the same mechanism as `find_similar` (the doc chunk's own stored embedd
 ## `/checkdocdrift` — explicit invocation
 
 Same reasoning as `/refsearch` below: `.claude/commands/checkdocdrift.md` calls `mcp__reference-mcp__check_doc_drift` directly. Usage: `/checkdocdrift <path> <start_line>`, e.g. `/checkdocdrift docs/mcp-agent-usage.md 1`. Passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, same auto-scoping as `/refsearch`.
+
+## the `explain` tool
+
+Input:
+```json
+{ "query": "parse_config", "top_k": 3, "folder": "/Users/you/Documents/GitHub/reference" }
+```
+- `query`: natural language, an identifier, or a short phrase — unlike `search`, phrasing doesn't matter here.
+- `top_k`: optional, defaults to 3, not 5 — citations are curated by `synthesize`'s own relevance cutoff, not a ranked list, so a larger number just admits lower-relevance noise.
+- `folder` / `exclude_folder`: optional, same reasoning as `search`'s params.
+
+Output (JSON text content):
+```json
+{
+  "citations": [
+    { "path": "/abs/path/to/file.rs", "snippet": "fn parse_config(path: &str) -> bool { ... }", "start_line": 12, "end_line": 15, "chunk_kind": "function" }
+  ]
+}
+```
+No `results` field — `explain` is citations-only, use `search` first if you also want the ranked hit list.
+
+`search` only synthesizes citations when the query reads as a grammatical question (`synthesize::is_question` in `core/src/synthesize.rs`) — a real, tested gap: a bare identifier query like `"parse_config"` gets raw results but zero citations from `search`, even though an agent asking about a specific function by name clearly wants an explanation. `explain` runs the identical extractive `synthesize()` mechanism (no generative model involved — see `docs/mcp-tool-ideas.md` idea 4 for why "explain" here means "verbatim citation," not "generated prose") but skips the phrasing gate entirely, so it synthesizes unconditionally.
+
+## `/explain` — explicit invocation
+
+Same reasoning as `/refsearch` below: `.claude/commands/explain.md` calls `mcp__reference-mcp__explain` directly. Usage: `/explain <query>`, e.g. `/explain parse_config`. Passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, same auto-scoping as `/refsearch`.
 
 ## `/recall` — cross-repo recall
 

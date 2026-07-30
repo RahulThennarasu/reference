@@ -34,11 +34,13 @@ value here has no substitute inside a single repo, grep structurally cannot do t
 
 shipped as an `exclude_folder` param on the existing `search` tool rather than a new tool — same ranking mechanism, just an inverted `path NOT LIKE` predicate ANDed alongside the existing `folder` scope-in (`Store::hybrid_search` in `core/src/store.rs`, param wiring in `mcp/src/main.rs`), plus a `/recall <query>` command that passes `exclude_folder: ${CLAUDE_PROJECT_DIR}` (the inverse of `/refsearch`'s `folder: ${CLAUDE_PROJECT_DIR}`). see `docs/mcp-agent-usage.md` for the full tool reference.
 
-## idea 4: expose synthesize as its own tool
+## idea 4: expose synthesize as its own tool — implemented, narrower than originally framed
 
-`core/src/synthesize.rs` already builds full answers with citations, the mcp server only exposes bare `search` today. split it out as an `explain` tool: "how does x work end to end," not "find snippet of x."
+correction made while building this: `core/src/synthesize.rs` is not a narrative answer generator, there's no LLM call anywhere in this codebase (only `candle` for embeddings, per this project's own non-goals). `synthesize()` is purely extractive — it cites a whole code chunk verbatim, or picks the single closest-matching sentence for prose. "how does x work end to end" as generated prose isn't something this codebase can produce without adding a generative model, which conflicts with the explicit non-goal of no general chatbot mode.
 
-different job from search. narrative explanation keeps getting needed deep into a session (onboarding-shaped questions, "why is this built this way"), unlike point lookups which get answered once and stay answered.
+the real, narrower gap: `search` already calls `synthesize()`, but only for grammatically question-shaped queries (`synthesize::is_question`). a bare identifier or short phrase query — exactly what an agent types after finding a name via `search` or `find_similar` — gets raw results with zero citations, even though that's clearly "explain this," not "just list matches." this is a real, already-tested boundary case (`search_returns_citations_only_for_question_shaped_queries` in `mcp/src/main.rs` proves `"parse_config"` gets no citations today).
+
+shipped as `mcp__reference-mcp__explain` (tool wiring in `mcp/src/main.rs`, no core changes needed — reuses `hybrid_search` and `synthesize` as-is): same extractive citation mechanism as `search`, but unconditional, no phrasing gate. plus a `/explain <query>` command mirroring `/refsearch`. see `docs/mcp-agent-usage.md` for the full tool reference.
 
 ## idea 5: push instead of pull
 

@@ -69,6 +69,29 @@ struct JsonHit {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ExplainParams {
+    /// Natural language query, identifier, or short phrase describing what
+    /// to explain — unlike `search`, phrasing doesn't matter here. `search`
+    /// only synthesizes citations when the query reads as a grammatical
+    /// question (`synthesize::is_question`), so a query like "parse_config"
+    /// or "rate limiting" gets raw results but zero citations even when an
+    /// agent genuinely wants an explanation, not just a location. This tool
+    /// always synthesizes, regardless of phrasing.
+    query: String,
+    /// How many citations to return. Defaults to 3 (`synthesize`'s own
+    /// `MAX_CITED_FILES`, not `search`'s default 5 — citations are curated,
+    /// not a ranked list, so a larger number just admits lower-relevance
+    /// noise past `synthesize`'s own relevance cutoff).
+    top_k: Option<usize>,
+    /// Scope to one watched folder (absolute path). Same reasoning as
+    /// `search`'s `folder` param.
+    folder: Option<String>,
+    /// Exclude one watched folder (absolute path). Same reasoning as
+    /// `search`'s `exclude_folder` param.
+    exclude_folder: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct FindSimilarParams {
     /// Absolute path of the file containing the chunk to compare against —
     /// usually the `path` of a hit already returned by `search`.
@@ -208,6 +231,61 @@ impl ReferenceServer {
             .collect();
 
         let body = json!({ "results": results, "citations": citations });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            body.to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Explain something in the indexed codebase by returning synthesized citations, unconditionally, regardless of how the query is phrased. Use this instead of `search` when you want an explanation of what/how/why for a specific identifier or short phrase (e.g. \"parse_config\", \"rate limiting\") that isn't grammatically a question — `search` only synthesizes citations for question-shaped queries and would return raw results with no citations for a query like that."
+    )]
+    async fn explain(
+        &self,
+        Parameters(ExplainParams { query, top_k, folder, exclude_folder }): Parameters<ExplainParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let k = top_k.unwrap_or(3);
+
+        let embedding = self
+            .embedder
+            .embed(&query)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let hits = self
+            .store
+            .hybrid_search(
+                &query,
+                &embedding,
+                SYNTHESIS_CANDIDATE_POOL,
+                folder.as_deref(),
+                exclude_folder.as_deref(),
+                &RankingWeights::default(),
+            )
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        // Unlike `search`, no `is_question` gate — that heuristic exists to
+        // keep plain lookups from being needlessly narrated, but a caller
+        // reaching for `explain` specifically has already decided they want
+        // an explanation, whatever the query looks like.
+        let citations = if hits.is_empty() {
+            Vec::new()
+        } else {
+            synthesize::synthesize(&self.embedder, &query, &hits)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        };
+
+        let citations: Vec<JsonCitation> = citations
+            .into_iter()
+            .take(k)
+            .map(|c| JsonCitation {
+                path: c.path,
+                snippet: c.snippet,
+                start_line: c.start_line,
+                end_line: c.end_line,
+                chunk_kind: c.chunk_kind,
+            })
+            .collect();
+
+        let body = json!({ "citations": citations });
         Ok(CallToolResult::success(vec![ContentBlock::text(
             body.to_string(),
         )]))
@@ -520,6 +598,46 @@ mod tests {
             results.iter().any(|r| r["path"].as_str().unwrap().starts_with("/watched/other_proj/")),
             "exclude_folder must still return hits from other watched folders: {results:?}"
         );
+    }
+
+    /// The exact gap idea 4 (docs/mcp-tool-ideas.md) targets: `search`'s
+    /// `is_question` heuristic skips synthesis for a bare identifier query,
+    /// even though an agent asking about a specific function by name clearly
+    /// wants an explanation, not just a location. `explain` must synthesize
+    /// regardless.
+    #[tokio::test]
+    async fn explain_synthesizes_citations_for_a_non_question_shaped_query() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        server
+            .store
+            .replace_chunks(
+                "/proj/config.rs",
+                records_for(&embedder, "rs", "fn parse_config(path: &str) -> bool { path.ends_with(\".toml\") }").await,
+            )
+            .await
+            .unwrap();
+
+        // Same literal-identifier query the `search` test proves gets zero
+        // citations there.
+        let result = server
+            .explain(Parameters(ExplainParams {
+                query: "parse_config".to_string(),
+                top_k: None,
+                folder: None,
+                exclude_folder: None,
+            }))
+            .await
+            .expect("explain must succeed");
+
+        let body = extract_json(&result);
+        let citations = body["citations"].as_array().unwrap();
+        assert!(
+            !citations.is_empty(),
+            "explain must synthesize citations even for a non-question-shaped query"
+        );
+        assert!(citations[0]["snippet"].as_str().unwrap().contains("parse_config"));
     }
 
     #[tokio::test]
