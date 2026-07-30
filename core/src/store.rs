@@ -219,12 +219,20 @@ impl Store {
     /// file from a completely different watched folder that merely shares
     /// some vocabulary — an actual observed failure mode, not a
     /// hypothetical one (see docs/mcp-agent-usage.md).
+    ///
+    /// `exclude_folder`, when set, is the inverse: scans every watched
+    /// folder *except* that one. For "how did I solve this in a different
+    /// project" recall — the current project's own code isn't prior art for
+    /// itself, so an agent working in one repo wants other watched repos
+    /// only, not the one it's already sitting in. Both filters can combine
+    /// (`only_if` ANDs them), though in practice only one is set at a time.
     pub async fn hybrid_search(
         &self,
         query_text: &str,
         query_embedding: &[f32],
         k: usize,
         folder: Option<&str>,
+        exclude_folder: Option<&str>,
         weights: &RankingWeights,
     ) -> Result<Vec<HybridHit>> {
         let mut query = self.table.query().select(Select::Columns(vec![
@@ -240,6 +248,10 @@ impl Store {
         if let Some(folder) = folder {
             let folder = folder.trim_end_matches('/').replace('\'', "''");
             query = query.only_if(format!("path LIKE '{folder}/%'"));
+        }
+        if let Some(exclude_folder) = exclude_folder {
+            let exclude_folder = exclude_folder.trim_end_matches('/').replace('\'', "''");
+            query = query.only_if(format!("path NOT LIKE '{exclude_folder}/%'"));
         }
         let batches = query.execute().await?.try_collect::<Vec<_>>().await?;
 
@@ -688,6 +700,7 @@ fn render_widget(name: &str) -> String {
                 &query_embedding,
                 5,
                 None,
+                None,
                 &RankingWeights::default(),
             )
             .await
@@ -843,6 +856,48 @@ fn parse_config(path: &str) -> bool {
     /// upsert path a live edit would trigger, and confirms the index isn't
     /// left in a state that breaks search or hides the update.
     #[tokio::test]
+    async fn hybrid_search_exclude_folder_omits_that_folder_but_keeps_others() {
+        let embedder = embedder().await;
+        let (_dir, store) = open_temp_store().await;
+
+        store
+            .replace_chunks(
+                "/watched/current_proj/widget.rs",
+                records_for(embedder, "rs", "fn render_widget(name: &str) -> String { format!(\"<widget {name}>\") }").await,
+            )
+            .await
+            .unwrap();
+        store
+            .replace_chunks(
+                "/watched/other_proj/widget.rs",
+                records_for(embedder, "rs", "fn render_widget(name: &str) -> String { format!(\"<other-widget {name}>\") }").await,
+            )
+            .await
+            .unwrap();
+
+        let query_embedding = embedder.embed("render a widget").unwrap();
+        let hits = store
+            .hybrid_search(
+                "render a widget",
+                &query_embedding,
+                5,
+                None,
+                Some("/watched/current_proj"),
+                &RankingWeights::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().all(|h| !h.path.starts_with("/watched/current_proj/")),
+            "exclude_folder must omit every hit from the excluded folder: {:?}",
+            hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+        );
+        assert!(hits.iter().any(|h| h.path.starts_with("/watched/other_proj/")));
+    }
+
+    #[tokio::test]
     async fn merge_insert_after_vector_index_is_built() {
         let embedder = embedder().await;
         let (_dir, store) = open_temp_store().await;
@@ -902,7 +957,7 @@ fn keep_me() -> i32 { 1 }
 
         let query_embedding = embedder.embed("keep_me").unwrap();
         let hits = store
-            .hybrid_search("keep_me", &query_embedding, 5, None, &RankingWeights::default())
+            .hybrid_search("keep_me", &query_embedding, 5, None, None, &RankingWeights::default())
             .await
             .unwrap();
         assert!(

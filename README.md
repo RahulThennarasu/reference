@@ -46,7 +46,7 @@ this app is the real version: an actual local index of your files, kept current 
 - code-aware chunking: search and cite exact functions/classes, not just whole files
 - answer synthesis with source citations, linking back to the actual file, code citations are syntax-highlighted with a high-contrast palette tuned for the app's dark theme
 - a "send to agent" button on every result and citation: copies a formatted query + code/line-range context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent (claude code, codex, etc.) they're using
-- an MCP server (`mcp/`) exposing three read-only tools over the same index, for agents to query directly mid-task instead of shelling out to a CLI: `search` for natural-language lookup, `find_similar` for finding near-duplicate chunks given one already found, `check_doc_drift` for flagging a doc chunk that no longer scores close to the code it describes. `cargo build -p reference-mcp` once, then register it yourself with `claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp` — see `docs/mcp-agent-usage.md` for the full setup
+- an MCP server (`mcp/`) exposing three read-only tools over the same index, for agents to query directly mid-task instead of shelling out to a CLI: `search` for natural-language lookup (with an `exclude_folder` param for cross-repo recall — "how did I solve this in a different project"), `find_similar` for finding near-duplicate chunks given one already found, `check_doc_drift` for flagging a doc chunk that no longer scores close to the code it describes. `cargo build -p reference-mcp` once, then register it yourself with `claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp` — see `docs/mcp-agent-usage.md` for the full setup
 
 ## explicitly out of scope for v1
 
@@ -83,4 +83,4 @@ claude mcp add --scope user reference-mcp -- /path/to/reference.app/Contents/Mac
 
 (on a normal install this would be `/Applications/reference.app/Contents/MacOS/reference-mcp`; adjust the path to wherever your build landed, e.g. `target/debug/bundle/macos/reference.app/...` for a local dev build).
 
-verify with `claude mcp list` — should show `reference-mcp ✔ Connected`. it only searches folders you've already added to the app (⌘7); see `docs/mcp-agent-usage.md` for the full tool reference, the `/refsearch`, `/findsimilar`, and `/checkdocdrift` commands, and caveats.
+verify with `claude mcp list` — should show `reference-mcp ✔ Connected`. it only searches folders you've already added to the app (⌘7); see `docs/mcp-agent-usage.md` for the full tool reference, the `/refsearch`, `/findsimilar`, `/checkdocdrift`, and `/recall` commands, and caveats.

@@ -377,7 +377,7 @@ mod tests {
 
         let query_embedding = embedder.embed("widgets").unwrap();
         let hits = store
-            .hybrid_search("widgets", &query_embedding, 10, None, &crate::store::RankingWeights::default())
+            .hybrid_search("widgets", &query_embedding, 10, None, None, &crate::store::RankingWeights::default())
             .await
             .unwrap();
         assert!(hits.iter().all(|h| !h.path.ends_with("ignored.txt")));

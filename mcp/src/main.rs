@@ -44,6 +44,14 @@ struct SearchParams {
     /// shares some vocabulary with the query can outrank the file that's
     /// actually relevant.
     folder: Option<String>,
+    /// Exclude one watched folder (absolute path) from the search — the
+    /// inverse of `folder`. Set this to the current project's root when
+    /// looking for how something was solved in a *different* watched
+    /// project: the current project's own code isn't prior art for itself,
+    /// so searching it too would just return the thing already being worked
+    /// on instead of past solutions elsewhere. Mutually exclusive with
+    /// `folder` in practice, though not enforced.
+    exclude_folder: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -143,7 +151,7 @@ impl ReferenceServer {
     )]
     async fn search(
         &self,
-        Parameters(SearchParams { query, top_k, folder }): Parameters<SearchParams>,
+        Parameters(SearchParams { query, top_k, folder, exclude_folder }): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let k = top_k.unwrap_or(5);
 
@@ -163,6 +171,7 @@ impl ReferenceServer {
                 &embedding,
                 k.max(SYNTHESIS_CANDIDATE_POOL),
                 folder.as_deref(),
+                exclude_folder.as_deref(),
                 &RankingWeights::default(),
             )
             .await
@@ -376,6 +385,7 @@ mod tests {
                 query: "reading a configuration file from disk".to_string(),
                 top_k: None,
                 folder: None,
+                exclude_folder: None,
             }))
             .await
             .expect("search must succeed");
@@ -408,6 +418,7 @@ mod tests {
                 query: "a function".to_string(),
                 top_k: Some(2),
                 folder: None,
+                exclude_folder: None,
             }))
             .await
             .expect("search must succeed");
@@ -447,6 +458,7 @@ mod tests {
                 query: "render a widget".to_string(),
                 top_k: None,
                 folder: Some("/watched/proj_a".to_string()),
+                exclude_folder: None,
             }))
             .await
             .expect("search must succeed");
@@ -457,6 +469,56 @@ mod tests {
         assert!(
             results.iter().all(|r| r["path"].as_str().unwrap().starts_with("/watched/proj_a/")),
             "folder scoping must exclude every hit from other watched folders: {results:?}"
+        );
+    }
+
+    /// Cross-repo recall (docs/mcp-tool-ideas.md idea 3): an agent working in
+    /// one watched project asking "how did I solve this elsewhere" wants the
+    /// current project's own code excluded, not just some other folder
+    /// included — otherwise the thing already being worked on (which best
+    /// matches its own description, trivially) drowns out prior art.
+    #[tokio::test]
+    async fn search_exclude_folder_param_omits_the_current_project_but_keeps_others() {
+        let (_dir, server) = test_server().await;
+        let embedder = embedder().await;
+
+        server
+            .store
+            .replace_chunks(
+                "/watched/current_proj/widget.rs",
+                records_for(&embedder, "rs", "fn render_widget(name: &str) -> String { format!(\"<widget {name}>\") }").await,
+            )
+            .await
+            .unwrap();
+        server
+            .store
+            .replace_chunks(
+                "/watched/other_proj/widget.rs",
+                records_for(&embedder, "rs", "fn render_widget(name: &str) -> String { format!(\"<other-widget {name}>\") }").await,
+            )
+            .await
+            .unwrap();
+
+        let result = server
+            .search(Parameters(SearchParams {
+                query: "render a widget".to_string(),
+                top_k: None,
+                folder: None,
+                exclude_folder: Some("/watched/current_proj".to_string()),
+            }))
+            .await
+            .expect("search must succeed");
+
+        let body = extract_json(&result);
+        let results = body["results"].as_array().unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results.iter().all(|r| !r["path"].as_str().unwrap().starts_with("/watched/current_proj/")),
+            "exclude_folder must omit every hit from the excluded folder: {results:?}"
+        );
+        assert!(
+            results.iter().any(|r| r["path"].as_str().unwrap().starts_with("/watched/other_proj/")),
+            "exclude_folder must still return hits from other watched folders: {results:?}"
         );
     }
 
@@ -594,6 +656,7 @@ mod tests {
                 query: "how do we parse a config file".to_string(),
                 top_k: None,
                 folder: None,
+                exclude_folder: None,
             }))
             .await
             .expect("search must succeed");
@@ -608,6 +671,7 @@ mod tests {
                 query: "parse_config".to_string(),
                 top_k: None,
                 folder: None,
+                exclude_folder: None,
             }))
             .await
             .expect("search must succeed");

@@ -26,11 +26,13 @@ answers "is this doc still true," a question that needs re-asking every time cod
 
 shipped as `mcp__reference-mcp__check_doc_drift` (`Store::check_doc_drift` in `core/src/store.rs`, tool wiring in `mcp/src/main.rs`), plus a `/checkdocdrift <path> <start_line>` command mirroring `/findsimilar`. built on the same embedding-scan mechanism as `find_similar`, filtered to exclude other doc chunks (`chunk_kind = "file"`) so a prose doc only gets compared against actual code constructs. see `docs/mcp-agent-usage.md` for the full tool reference.
 
-## idea 3: cross-repo recall
+## idea 3: cross-repo recall — implemented
 
 `search`'s `folder` param currently narrows a query to one watched folder. add the inverse: a tool for "how did i solve x in a different project i've indexed."
 
 value here has no substitute inside a single repo, grep structurally cannot do this. stays useful for the whole session since the need for prior-project recall doesn't front-load the way "where is this file" does.
+
+shipped as an `exclude_folder` param on the existing `search` tool rather than a new tool — same ranking mechanism, just an inverted `path NOT LIKE` predicate ANDed alongside the existing `folder` scope-in (`Store::hybrid_search` in `core/src/store.rs`, param wiring in `mcp/src/main.rs`), plus a `/recall <query>` command that passes `exclude_folder: ${CLAUDE_PROJECT_DIR}` (the inverse of `/refsearch`'s `folder: ${CLAUDE_PROJECT_DIR}`). see `docs/mcp-agent-usage.md` for the full tool reference.
 
 ## idea 4: expose synthesize as its own tool
 

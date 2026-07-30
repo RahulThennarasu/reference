@@ -219,6 +219,12 @@ async fn search(
             &embedding,
             top_k.max(SYNTHESIS_CANDIDATE_POOL),
             folder.as_deref(),
+            // Cross-repo `exclude_folder` recall (see docs/mcp-tool-ideas.md
+            // idea 3) is agent-facing only for now, same reasoning as
+            // gap #3/#5 in docs/feature-gaps.md keeping other knobs
+            // app-only in the other direction — the desktop search palette
+            // has no UI for it yet.
+            None,
             &weights,
         )
         .await

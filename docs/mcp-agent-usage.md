@@ -45,6 +45,7 @@ Input:
 - `query`: natural language, not a grep pattern — describe behavior or intent, not a literal string.
 - `top_k`: optional, defaults to 5.
 - `folder`: optional, scopes the search to one watched folder (absolute path). Set this whenever the agent knows which project the query is about — without it, an unrelated watched folder that merely shares some vocabulary with the query can outrank the file that's actually relevant. This was an actual observed failure: a query about this repo's own MCP server returned a file from a completely different watched project ahead of the correct one, purely on coincidental word overlap. Filtering happens at the query level (`only_if`), not after fetching results, so out-of-scope rows are never scored at all.
+- `exclude_folder`: optional, the inverse of `folder` — excludes one watched folder instead of scoping to it. Set this to the current project's root when the question is "how did I solve this in a *different* project," not "where is this in my current one": the current project's own code isn't prior art for itself, and including it just returns the thing already being worked on instead of a past solution elsewhere. Both params can combine, though in practice only one is set at a time.
 
 Output (JSON text content):
 ```json
@@ -112,6 +113,10 @@ Built on the same mechanism as `find_similar` (the doc chunk's own stored embedd
 ## `/checkdocdrift` — explicit invocation
 
 Same reasoning as `/refsearch` below: `.claude/commands/checkdocdrift.md` calls `mcp__reference-mcp__check_doc_drift` directly. Usage: `/checkdocdrift <path> <start_line>`, e.g. `/checkdocdrift docs/mcp-agent-usage.md 1`. Passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, same auto-scoping as `/refsearch`.
+
+## `/recall` — cross-repo recall
+
+`.claude/commands/recall.md` calls `mcp__reference-mcp__search` with `exclude_folder: ${CLAUDE_PROJECT_DIR}` instead of `folder`, so it searches every *other* watched project by default, never the one the session is currently in. Usage: `/recall <query>`, e.g. `/recall how did I handle rate limiting`. Answers a different question than `/refsearch`: not "where is this in my current project" but "how did I solve this somewhere else before."
 
 ## `/refsearch` — explicit invocation
 

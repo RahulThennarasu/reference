@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
         let mut search_ms = Vec::new();
         for _ in 0..5 {
             let search_start = Instant::now();
-            let hits = store.hybrid_search(q, &embedding, 8, None, &RankingWeights::default()).await?;
+            let hits = store.hybrid_search(q, &embedding, 8, None, None, &RankingWeights::default()).await?;
             search_ms.push(search_start.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(&hits);
         }

@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         for _ in 0..8 {
             let start = Instant::now();
             let hits = store
-                .hybrid_search("synthetic query text", &query_embedding, 8, None, &RankingWeights::default())
+                .hybrid_search("synthetic query text", &query_embedding, 8, None, None, &RankingWeights::default())
                 .await?;
             timings.push(start.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(&hits);
