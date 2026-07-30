@@ -1,6 +1,6 @@
 # reference-mcp for coding agents
 
-`reference-mcp` is the agent-facing side of `reference` — the successor to the removed `reference-cli`. It's an MCP server exposing one read-only tool, `search`, over the same index the desktop app watches and writes (`~/.reference/index`).
+`reference-mcp` is the agent-facing side of `reference` — the successor to the removed `reference-cli`. It's an MCP server exposing two read-only tools, `search` and `find_similar`, over the same index the desktop app watches and writes (`~/.reference/index`).
 
 ## why this exists (and why not the old CLI)
 
@@ -60,6 +60,32 @@ Output (JSON text content):
 Broadly the same shape the old CLI's `--json` mode produced, with one addition: every `results` entry now includes the chunk's full `content` too, not just a file:line pointer — `hybrid_search` already has it in hand, and an MCP caller (an agent) almost always needs the actual text next, so returning it here saves a follow-up file read on every search, question-shaped or not. `citations` is still only populated when the query reads as a question (`synthesize::is_question`) — see `docs/code-aware-chunking.md` for what `chunk_kind` values mean and how citation snippets are chosen.
 
 Ranking itself blends three signals, not two: semantic similarity, fuzzy filename match, and literal term overlap against the chunk's own content (a lightweight complement to embeddings — catches a chunk that verbatim contains the words searched for, even if its embedding similarity is only middling because it also covers other things). This match is whole-word, not a raw substring check — a naive `content.contains("build")` matches inside "rebuild"/"builds"/"building" too, which turned a query like "how does X build Y" into noise, rewarding any file with unrelated build-system comments (`Cargo.toml`'s "release build"/"rebuild" comments were an actual observed case) over the file that was really relevant. Fuzzy filename matching still drops to zero weight for question-shaped queries (see `core/src/store.rs`'s `hybrid_search` for the exact weights); content-term overlap applies to both query shapes.
+
+## the `find_similar` tool
+
+Input:
+```json
+{ "path": "/Users/you/Documents/GitHub/reference/core/src/chunk.rs", "start_line": 678, "top_k": 5, "folder": "/Users/you/Documents/GitHub/reference" }
+```
+- `path` / `start_line`: identify the chunk to compare against — usually taken straight from a prior `search` hit's `path` and `start_line`, not typed by hand. A file is chunked into multiple rows (see `docs/code-aware-chunking.md`), so `start_line` picks which chunk in the file, not just which file.
+- `top_k`: optional, defaults to 5.
+- `folder`: optional, scopes candidates to one watched folder, same reasoning as `search`'s `folder` param.
+
+Output (JSON text content):
+```json
+{
+  "results": [
+    { "path": "/abs/path/to/other_file.rs", "start_line": 578, "end_line": 607, "chunk_kind": "function", "score": 0.92, "content": "fn some_similar_chunk(...) { ... }" }
+  ]
+}
+```
+No `query` field and no `citations` — there's no query text to embed or synthesize an answer from. The source chunk's own stored embedding is looked up first, then reused as the comparison vector against every other row's embedding (plain dot product, both sides already L2-normalized). The source chunk itself is always excluded from its own results by path + start_line, not by score.
+
+Use this after `search` has already located a chunk, to answer a different question than `search` answers: not "where is x" but "what else in the index looks like this." The intended use is catching duplicated or near-duplicate logic elsewhere in the index before writing new code that unknowingly repeats it — not a general similarity browser.
+
+## `/findsimilar` — explicit invocation
+
+Same reasoning as `/refsearch` below: `.claude/commands/findsimilar.md` calls `mcp__reference-mcp__find_similar` directly, bypassing tool-choice uncertainty. Usage: `/findsimilar <path> <start_line>`, e.g. `/findsimilar core/src/chunk.rs 678`. Passes `folder: ${CLAUDE_PROJECT_DIR}` automatically, same auto-scoping as `/refsearch`.
 
 ## `/refsearch` — explicit invocation
 

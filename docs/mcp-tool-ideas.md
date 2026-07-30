@@ -10,11 +10,13 @@ the complaint from agent sessions ("useful at the start, useless after") isn't a
 
 fixing this means shipping tools that answer questions grep and one-shot search can't, and that stay relevant deep into a session, not a better `search`.
 
-## idea 1: find_similar
+## idea 1: find_similar — implemented
 
 given a chunk (path + line range), return other chunks with high embedding similarity elsewhere in the index. the embeddings already exist per chunk in lancedb, this is a lookup against vectors already stored, not new infrastructure.
 
 useful mid-edit, not just at orientation: "you're about to write logic that already exists in store.rs." catches duplication an agent writing fresh code would otherwise never think to search for, because it doesn't know the duplicate exists.
+
+shipped as `mcp__reference-mcp__find_similar` (`Store::find_similar` in `core/src/store.rs`, tool wiring in `mcp/src/main.rs`), plus a `/findsimilar <path> <start_line>` command mirroring `/refsearch`. see `docs/mcp-agent-usage.md` for the full tool reference.
 
 ## idea 2: stale doc check
 
