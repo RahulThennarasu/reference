@@ -35,6 +35,30 @@ fn read_text(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// Lockfiles: machine-generated, no chunker exists for their formats (TOML/
+/// YAML/etc. aren't in `chunk`'s language list), so they fall back to one
+/// whole-file chunk — and being generated, that one chunk can be enormous
+/// (`Cargo.lock` alone was observed at ~266KB of content in a single search
+/// result, blowing past a caller's token budget). Checked in, not
+/// `.gitignore`d, so gitignore filtering alone doesn't skip them.
+const SKIPPED_FILENAMES: &[&str] = &[
+    "Cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "poetry.lock",
+    "Pipfile.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "go.sum",
+];
+
+fn is_skipped_file(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| SKIPPED_FILENAMES.contains(&n))
+}
+
 /// Compiles every `.gitignore` found under `root` into a single matcher, so
 /// live file events under `target/`, `node_modules/`, etc. can be skipped
 /// the same way the initial scan skips them. Built once per `watch()` call;
@@ -52,6 +76,9 @@ fn build_gitignore(root: &Path) -> Gitignore {
 }
 
 async fn index_file(embedder: &Embedder, store: &Store, path: &Path) -> Result<()> {
+    if is_skipped_file(path) {
+        return Ok(());
+    }
     let Some(content) = read_text(path) else {
         return Ok(());
     };
@@ -123,6 +150,7 @@ pub fn count_indexable_files(folder: &Path, cap: usize) -> usize {
         .build()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter(|e| !is_skipped_file(e.path()))
     {
         count += 1;
         if count > cap {

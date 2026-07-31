@@ -235,6 +235,12 @@ impl Store {
         exclude_folder: Option<&str>,
         weights: &RankingWeights,
     ) -> Result<Vec<HybridHit>> {
+        // A long-lived handle (the MCP server, kept alive for a whole agent
+        // session) otherwise never sees rows committed by another process
+        // (the app, reindexing a folder) — see docs/mcp-agent-usage.md's
+        // "reindex may need a session restart" caveat. Cheap: just a
+        // manifest read, not a rescan of table contents.
+        self.table.checkout_latest().await?;
         let mut query = self.table.query().select(Select::Columns(vec![
             "path".to_string(),
             "start_line".to_string(),
@@ -362,6 +368,8 @@ impl Store {
     /// exact, they're all equally "the thing you asked for" (e.g. same
     /// method name implemented on several types).
     pub async fn find_by_name(&self, name: &str, folder: Option<&str>) -> Result<Vec<HybridHit>> {
+        // See the same call in `hybrid_search` above.
+        self.table.checkout_latest().await?;
         let escaped = name.replace('\'', "''");
         let mut predicate = format!("name = '{escaped}'");
         if let Some(folder) = folder {
@@ -487,6 +495,9 @@ impl Store {
     /// tool (`find_similar`, `check_doc_drift`) instead of each re-querying
     /// for it.
     async fn chunk_embedding(&self, path: &str, start_line: i32) -> Result<Vec<f32>> {
+        // Shared by `find_similar`/`check_doc_drift` — see the same call in
+        // `hybrid_search` above.
+        self.table.checkout_latest().await?;
         let escaped_path = path.replace('\'', "''");
         let batches = self
             .table
