@@ -30,6 +30,31 @@ use reference_core::synthesize;
 // same failure mode the app avoids by expanding its own search pool first.
 const SYNTHESIS_CANDIDATE_POOL: usize = 50;
 
+// Whole-file chunks (docs, or any language with no code-aware chunker — see
+// docs/code-aware-chunking.md) have no per-chunk size cap the way a parsed
+// function does, and an MCP caller's `content`/`snippet` field goes straight
+// into an agent's context window, unlike the app's UI where a human just
+// scrolls. A real observed case: a 5-hit `search` scoped to this repo's own
+// docs returned ~30KB of raw text in one call, most of it whole markdown
+// files repeated near-verbatim across hits. Truncating here (not in
+// `core::synthesize`, which the app also uses and has no such budget)
+// keeps every tool call's response bounded by default.
+const DEFAULT_MAX_CONTENT_CHARS: usize = 1500;
+
+/// Truncates `content` to at most `max_chars` *characters* (not bytes) so a
+/// multi-byte UTF-8 boundary is never split, with a trailing marker noting
+/// how much was cut — an agent that actually needs the rest already has
+/// `path`/`start_line`/`end_line` to read the file directly.
+fn truncate_content(content: &str, max_chars: usize) -> String {
+    let total_chars = content.chars().count();
+    if total_chars <= max_chars {
+        return content.to_string();
+    }
+    let truncated: String = content.chars().take(max_chars).collect();
+    let omitted = total_chars - max_chars;
+    format!("{truncated}\n… [truncated, {omitted} more chars — read the file directly for the rest]")
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchParams {
     /// Natural language query describing behavior or intent, not a grep
@@ -52,6 +77,14 @@ struct SearchParams {
     /// on instead of past solutions elsewhere. Mutually exclusive with
     /// `folder` in practice, though not enforced.
     exclude_folder: Option<String>,
+    /// Caps each result's `content` field to at most this many characters
+    /// (truncated with a marker noting how much was cut, not silently).
+    /// Defaults to 1500 — a whole-file chunk (a doc, or any language with no
+    /// code-aware chunker) has no per-chunk size limit otherwise and can
+    /// blow up a single tool call's response size. Raise this if you
+    /// specifically need a large chunk's full text; `path`/`start_line`/
+    /// `end_line` are always enough to read the rest directly regardless.
+    max_content_chars: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -89,6 +122,11 @@ struct ExplainParams {
     /// Exclude one watched folder (absolute path). Same reasoning as
     /// `search`'s `exclude_folder` param.
     exclude_folder: Option<String>,
+    /// Caps each citation's `snippet` field to at most this many characters.
+    /// Same reasoning and default (1500) as `search`'s `max_content_chars` —
+    /// a whole-chunk citation (a large function, or a whole prose file) has
+    /// no size limit otherwise.
+    max_content_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -106,6 +144,9 @@ struct FindSimilarParams {
     /// Scope candidates to one watched folder (absolute path). Omit to
     /// search everything this machine has opted into watching.
     folder: Option<String>,
+    /// Caps each result's `content` field to at most this many characters.
+    /// Same reasoning and default (1500) as `search`'s `max_content_chars`.
+    max_content_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -128,6 +169,9 @@ struct CheckDocDriftParams {
     /// Scope candidates to one watched folder (absolute path). Omit to
     /// search everything this machine has opted into watching.
     folder: Option<String>,
+    /// Caps each result's `content` field to at most this many characters.
+    /// Same reasoning and default (1500) as `search`'s `max_content_chars`.
+    max_content_chars: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -174,9 +218,12 @@ impl ReferenceServer {
     )]
     async fn search(
         &self,
-        Parameters(SearchParams { query, top_k, folder, exclude_folder }): Parameters<SearchParams>,
+        Parameters(SearchParams { query, top_k, folder, exclude_folder, max_content_chars }): Parameters<
+            SearchParams,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let k = top_k.unwrap_or(5);
+        let max_chars = max_content_chars.unwrap_or(DEFAULT_MAX_CONTENT_CHARS);
 
         let embedding = self
             .embedder
@@ -216,14 +263,14 @@ impl ReferenceServer {
                 end_line: h.end_line,
                 chunk_kind: h.chunk_kind.clone(),
                 score: h.score,
-                content: h.content.clone(),
+                content: truncate_content(&h.content, max_chars),
             })
             .collect();
         let citations: Vec<JsonCitation> = citations
             .into_iter()
             .map(|c| JsonCitation {
                 path: c.path,
-                snippet: c.snippet,
+                snippet: truncate_content(&c.snippet, max_chars),
                 start_line: c.start_line,
                 end_line: c.end_line,
                 chunk_kind: c.chunk_kind,
@@ -241,9 +288,12 @@ impl ReferenceServer {
     )]
     async fn explain(
         &self,
-        Parameters(ExplainParams { query, top_k, folder, exclude_folder }): Parameters<ExplainParams>,
+        Parameters(ExplainParams { query, top_k, folder, exclude_folder, max_content_chars }): Parameters<
+            ExplainParams,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let k = top_k.unwrap_or(3);
+        let max_chars = max_content_chars.unwrap_or(DEFAULT_MAX_CONTENT_CHARS);
 
         let embedding = self
             .embedder
@@ -278,7 +328,7 @@ impl ReferenceServer {
             .take(k)
             .map(|c| JsonCitation {
                 path: c.path,
-                snippet: c.snippet,
+                snippet: truncate_content(&c.snippet, max_chars),
                 start_line: c.start_line,
                 end_line: c.end_line,
                 chunk_kind: c.chunk_kind,
@@ -296,9 +346,12 @@ impl ReferenceServer {
     )]
     async fn find_similar(
         &self,
-        Parameters(FindSimilarParams { path, start_line, top_k, folder }): Parameters<FindSimilarParams>,
+        Parameters(FindSimilarParams { path, start_line, top_k, folder, max_content_chars }): Parameters<
+            FindSimilarParams,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let k = top_k.unwrap_or(5);
+        let max_chars = max_content_chars.unwrap_or(DEFAULT_MAX_CONTENT_CHARS);
 
         let hits = self
             .store
@@ -314,7 +367,7 @@ impl ReferenceServer {
                 end_line: h.end_line,
                 chunk_kind: h.chunk_kind.clone(),
                 score: h.score,
-                content: h.content.clone(),
+                content: truncate_content(&h.content, max_chars),
             })
             .collect();
 
@@ -329,12 +382,18 @@ impl ReferenceServer {
     )]
     async fn check_doc_drift(
         &self,
-        Parameters(CheckDocDriftParams { path, start_line, top_k, stale_threshold, folder }): Parameters<
-            CheckDocDriftParams,
-        >,
+        Parameters(CheckDocDriftParams {
+            path,
+            start_line,
+            top_k,
+            stale_threshold,
+            folder,
+            max_content_chars,
+        }): Parameters<CheckDocDriftParams>,
     ) -> Result<CallToolResult, McpError> {
         let k = top_k.unwrap_or(5);
         let threshold = stale_threshold.unwrap_or(0.35);
+        let max_chars = max_content_chars.unwrap_or(DEFAULT_MAX_CONTENT_CHARS);
 
         let (hits, likely_stale) = self
             .store
@@ -350,7 +409,7 @@ impl ReferenceServer {
                 end_line: h.end_line,
                 chunk_kind: h.chunk_kind.clone(),
                 score: h.score,
-                content: h.content.clone(),
+                content: truncate_content(&h.content, max_chars),
             })
             .collect();
 
@@ -464,6 +523,7 @@ mod tests {
                 top_k: None,
                 folder: None,
                 exclude_folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("search must succeed");
@@ -497,6 +557,7 @@ mod tests {
                 top_k: Some(2),
                 folder: None,
                 exclude_folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("search must succeed");
@@ -537,6 +598,7 @@ mod tests {
                 top_k: None,
                 folder: Some("/watched/proj_a".to_string()),
                 exclude_folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("search must succeed");
@@ -583,6 +645,7 @@ mod tests {
                 top_k: None,
                 folder: None,
                 exclude_folder: Some("/watched/current_proj".to_string()),
+                max_content_chars: None,
             }))
             .await
             .expect("search must succeed");
@@ -627,6 +690,7 @@ mod tests {
                 top_k: None,
                 folder: None,
                 exclude_folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("explain must succeed");
@@ -668,6 +732,7 @@ mod tests {
                 start_line,
                 top_k: None,
                 folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("find_similar must succeed");
@@ -720,6 +785,7 @@ mod tests {
                 top_k: None,
                 stale_threshold: Some(0.3),
                 folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("check_doc_drift must succeed");
@@ -748,6 +814,7 @@ mod tests {
                 top_k: None,
                 stale_threshold: Some(0.3),
                 folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("check_doc_drift must succeed");
@@ -775,6 +842,7 @@ mod tests {
                 top_k: None,
                 folder: None,
                 exclude_folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("search must succeed");
@@ -790,6 +858,7 @@ mod tests {
                 top_k: None,
                 folder: None,
                 exclude_folder: None,
+                max_content_chars: None,
             }))
             .await
             .expect("search must succeed");
