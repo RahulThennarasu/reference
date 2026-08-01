@@ -11,6 +11,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::table::NewColumnTransform;
 use lancedb::{connect, Connection, Table};
 use serde::{Deserialize, Serialize};
 
@@ -122,13 +123,46 @@ fn schema() -> SchemaRef {
     ]))
 }
 
+// Columns added to `schema()` after the table was first shipped, paired with
+// a SQL literal default for any row written before that column existed
+// (`''` for the empty-string convention `name` already uses for "no
+// identifier found", `false` for "not truncated" — matching what a fresh
+// index would have produced for old content anyway). `Store::open` backfills
+// these into an on-disk table that predates them instead of erroring: gap
+// #3 and #4 in docs/feature-gaps.md each added one of these columns, and
+// until now the only fix for an old table was `rm -rf ~/.reference/index`
+// and a full reindex — fine for a dev rebuilding from source every time, not
+// something a real installed user updating across a release should have to
+// discover from a `missing name column` error.
+const MIGRATABLE_COLUMNS: &[(&str, &str)] = &[("name", "''"), ("truncated", "false")];
+
+async fn migrate_schema(table: &Table) -> Result<()> {
+    let current = table.schema().await?;
+    let missing: Vec<(String, String)> = MIGRATABLE_COLUMNS
+        .iter()
+        .filter(|(name, _)| current.field_with_name(name).is_err())
+        .map(|(name, default)| (name.to_string(), default.to_string()))
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let names: Vec<&str> = missing.iter().map(|(n, _)| n.as_str()).collect();
+    println!("migrating index schema: adding column(s) {} to existing table", names.join(", "));
+    table.add_columns(NewColumnTransform::SqlExpressions(missing), None).await?;
+    Ok(())
+}
+
 impl Store {
     pub async fn open(db_uri: &str) -> Result<Self> {
         let db: Connection = connect(db_uri).execute().await?;
 
         let existing = db.table_names().execute().await?;
         let table = if existing.iter().any(|n| n == TABLE_NAME) {
-            db.open_table(TABLE_NAME).execute().await?
+            let table = db.open_table(TABLE_NAME).execute().await?;
+            migrate_schema(&table).await?;
+            table
         } else {
             db.create_empty_table(TABLE_NAME, schema()).execute().await?
         };
@@ -683,6 +717,67 @@ mod tests {
                 truncated,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn open_migrates_a_table_missing_name_and_truncated_columns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_uri = dir.path().to_str().unwrap();
+
+        // Simulates an on-disk index built before gap #3/#4 (docs/feature-gaps.md)
+        // added the `name`/`truncated` columns — the exact shape `Store::open`
+        // has to tolerate instead of erroring with `missing name column`.
+        let old_schema = Arc::new(Schema::new(vec![
+            Field::new("path", DataType::Utf8, false),
+            Field::new("start_line", DataType::Int32, false),
+            Field::new("end_line", DataType::Int32, false),
+            Field::new("chunk_kind", DataType::Utf8, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), EMBEDDING_DIM as i32),
+                false,
+            ),
+        ]));
+
+        let embedder = embedder().await;
+        let embedding = embedder.embed("fn old() {}").unwrap();
+        let batch = RecordBatch::try_new(
+            old_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["/proj/old.rs"])),
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(Int32Array::from(vec![5])),
+                Arc::new(StringArray::from(vec!["function"])),
+                Arc::new(StringArray::from(vec!["fn old() {}"])),
+                Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                    vec![Some(embedding.into_iter().map(Some).collect::<Vec<_>>())],
+                    EMBEDDING_DIM as i32,
+                )),
+            ],
+        )
+        .unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], old_schema);
+
+        let db = connect(db_uri).execute().await.unwrap();
+        db.create_table(TABLE_NAME, reader).execute().await.unwrap();
+
+        // Reopening through `Store::open` (not raw `db.open_table`) must add
+        // the missing columns rather than leaving `hybrid_search`/
+        // `find_by_name` erroring against a table shaped like an old release.
+        let store = Store::open(db_uri).await.expect("open should migrate, not error");
+
+        let hits = store.find_by_name("old", None).await.unwrap();
+        assert!(hits.is_empty(), "pre-migration row has no name, so it can't be found by name");
+
+        let query_embedding = embedder.embed("old function").unwrap();
+        let hits = store
+            .hybrid_search("old function", &query_embedding, 5, None, None, &RankingWeights::default())
+            .await
+            .expect("hybrid_search must not error against a migrated table");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "", "backfilled default for a pre-migration row");
+        assert!(!hits[0].truncated, "backfilled default for a pre-migration row");
     }
 
     #[tokio::test]
