@@ -15,17 +15,30 @@ use crate::chunk;
 use crate::embedding::Embedder;
 use crate::store::{ChunkRecord, Store};
 
+/// Caps how many failed paths `IndexProgress::failed` carries so a folder
+/// with hundreds of unreadable files doesn't balloon every progress tick's
+/// payload — `failed_count` still tracks the true total separately, so the
+/// UI can show "N failed" even once the list itself is capped.
+const MAX_TRACKED_FAILURES: usize = 20;
+
 /// Snapshot of how far the initial scan of a watched folder has gotten.
 /// `done` is the signal a progress bar should key off of to know indexing
 /// actually finished, not `indexed == total`: the file count used for
 /// `total` is taken before the scan starts (`count_indexable_files`), so a
 /// file created/deleted mid-scan can make `indexed` over/undershoot `total`
 /// slightly — `done` is set exactly once, after the scan loop truly exits.
-#[derive(Debug, Clone, Copy, Serialize)]
+/// `failed`/`failed_count` exist because a file that errors out of
+/// `index_file` previously only ever got an `eprintln!` — invisible in a
+/// packaged `.app` with no attached terminal, so a folder could finish
+/// scanning with files silently missing from the index and nothing in the
+/// UI showing it.
+#[derive(Debug, Clone, Serialize)]
 pub struct IndexProgress {
     pub indexed: usize,
     pub total: usize,
     pub done: bool,
+    pub failed_count: usize,
+    pub failed: Vec<String>,
 }
 
 /// Reads a file as UTF-8 text. Returns `None` for files that aren't valid
@@ -175,8 +188,10 @@ pub async fn watch(
     on_progress: impl Fn(IndexProgress) + Send + Sync + 'static,
 ) -> Result<()> {
     println!("indexing existing files under {}", folder.display());
-    on_progress(IndexProgress { indexed: 0, total: total_files, done: false });
+    on_progress(IndexProgress { indexed: 0, total: total_files, done: false, failed_count: 0, failed: Vec::new() });
     let mut indexed = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    let mut failed_count = 0usize;
     for entry in WalkBuilder::new(folder)
         // See `count_indexable_files`'s comment: without this, `.gitignore`
         // is silently skipped for any watched folder that isn't itself a
@@ -191,18 +206,28 @@ pub async fn watch(
         }
         if let Err(e) = index_file(embedder, store, entry.path()).await {
             eprintln!("failed to index {}: {e}", entry.path().display());
+            failed_count += 1;
+            if failed.len() < MAX_TRACKED_FAILURES {
+                failed.push(entry.path().display().to_string());
+            }
         }
         indexed += 1;
         // Clamped: `total_files` is counted before the walk starts, so a
         // file created mid-scan can otherwise push `indexed` past it and
         // report a progress bar over 100%.
-        on_progress(IndexProgress { indexed: indexed.min(total_files), total: total_files, done: false });
+        on_progress(IndexProgress {
+            indexed: indexed.min(total_files),
+            total: total_files,
+            done: false,
+            failed_count,
+            failed: failed.clone(),
+        });
     }
 
     // `done: true` is the actual completion signal (see `IndexProgress`'s
     // doc comment) — fired once, after the scan loop has fully exited,
     // regardless of whether `indexed` landed exactly on `total_files`.
-    on_progress(IndexProgress { indexed: total_files, total: total_files, done: true });
+    on_progress(IndexProgress { indexed: total_files, total: total_files, done: true, failed_count, failed });
 
     let gitignore = build_gitignore(folder);
 

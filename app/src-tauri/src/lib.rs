@@ -529,7 +529,7 @@ fn get_indexing_progress(
     let progress = state.indexing_progress.lock().map_err(|e| e.to_string())?;
     Ok(progress
         .iter()
-        .map(|(path, p)| (path.to_string_lossy().to_string(), *p))
+        .map(|(path, p)| (path.to_string_lossy().to_string(), p.clone()))
         .collect())
 }
 

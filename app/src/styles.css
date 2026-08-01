@@ -108,6 +108,23 @@ body {
   white-space: nowrap;
 }
 
+/* Shown next to the progress bar/label whenever the current scan has files
+   that failed to index (core/src/watcher.rs's `IndexProgress.failed_count`)
+   — previously only an `eprintln!`, invisible in a packaged `.app` with no
+   attached terminal, so a folder could finish "indexed" with files
+   silently missing and nothing showing it. Uses .hljs-keyword's pink so it
+   reads as part of the same syntax-highlighting palette as the rest of the
+   app rather than an unrelated warning color bolted on — same reasoning as
+   .exact-match-badge/.truncated-badge borrowing their colors from that
+   palette too. Hover for which files (capped list + a remainder count). */
+.index-progress-failed {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ff2d95;
+  white-space: nowrap;
+}
+
 #results {
   list-style: none;
   margin: 0;

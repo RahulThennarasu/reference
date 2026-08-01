@@ -312,6 +312,7 @@ let updateDotEl: HTMLElement | null;
 let indexProgressEl: HTMLElement | null;
 let indexProgressBarEl: HTMLElement | null;
 let indexProgressLabelEl: HTMLElement | null;
+let indexProgressFailedEl: HTMLElement | null;
 
 // Set once `checkForAppUpdate` finds a newer release; null means either no
 // check has completed yet or the app is already current. Held onto (rather
@@ -1079,6 +1080,8 @@ interface IndexProgress {
   indexed: number;
   total: number;
   done: boolean;
+  failed_count: number;
+  failed: string[];
 }
 
 // Keyed by folder path, only ever contains folders still mid-scan (see
@@ -1103,7 +1106,7 @@ async function pollIndexingProgress() {
 }
 
 function renderIndexProgress() {
-  if (!indexProgressEl || !indexProgressBarEl || !indexProgressLabelEl) return;
+  if (!indexProgressEl || !indexProgressBarEl || !indexProgressLabelEl || !indexProgressFailedEl) return;
   const entries = Object.values(indexingProgress);
 
   if (entries.length === 0) {
@@ -1128,6 +1131,23 @@ function renderIndexProgress() {
 
   const folderWord = entries.length === 1 ? "folder" : "folders";
   indexProgressLabelEl.textContent = `indexing ${indexed}/${total} files (${entries.length} ${folderWord})`;
+
+  // Each folder's `failed` list is independently capped at the backend
+  // (`MAX_TRACKED_FAILURES`, core/src/watcher.rs) — `failed_count` still
+  // carries the true total per folder, so summing both across folders keeps
+  // the displayed count accurate even once the listed paths are capped.
+  const failedCount = entries.reduce((sum, p) => sum + p.failed_count, 0);
+  if (failedCount > 0) {
+    const failedPaths = entries.flatMap((p) => p.failed);
+    indexProgressFailedEl.textContent = `${failedCount} failed`;
+    const shown = failedPaths.map((p) => basename(p)).join("\n");
+    const omitted = failedCount - failedPaths.length;
+    indexProgressFailedEl.title =
+      omitted > 0 ? `${shown}\n…and ${omitted} more` : shown;
+    indexProgressFailedEl.hidden = false;
+  } else {
+    indexProgressFailedEl.hidden = true;
+  }
 
   const wasHidden = indexProgressEl.hidden;
   indexProgressEl.hidden = false;
@@ -1294,6 +1314,7 @@ window.addEventListener("DOMContentLoaded", () => {
   indexProgressEl = document.querySelector("#index-progress");
   indexProgressBarEl = document.querySelector("#index-progress-bar");
   indexProgressLabelEl = document.querySelector("#index-progress-label");
+  indexProgressFailedEl = document.querySelector("#index-progress-failed");
 
   copyAllBtnEl?.addEventListener("click", () => copyAllVisible());
 
