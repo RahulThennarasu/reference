@@ -57,6 +57,8 @@ pub fn chunk_source(extension: &str, source: &str) -> Option<Vec<Chunk>> {
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => {
             chunk_with(tree_sitter_cpp::LANGUAGE.into(), CPP_QUERY_SRC, source)
         }
+        "rb" => chunk_with(tree_sitter_ruby::LANGUAGE.into(), RUBY_QUERY_SRC, source),
+        "swift" => chunk_with(tree_sitter_swift::LANGUAGE.into(), SWIFT_QUERY_SRC, source),
         _ => None,
     }
 }
@@ -141,14 +143,52 @@ const CPP_QUERY_SRC: &str = "
 (struct_specifier) @item
 ";
 
+// Ruby: `method`/`singleton_method` cover instance and `def self.foo`/
+// `def obj.foo` methods respectively, both top-level and nested inside a
+// `class`/`module` body — same container relationship as rust impl/python
+// class. `singleton_class` (`class << self ... end`) is deliberately not
+// matched: rare enough in practice not to be worth a special case, and an
+// unmatched block still gets indexed via its containing class/module chunk
+// rather than being dropped. Verified against the grammar's own `tags.scm`
+// (node kinds + `name:` fields), not assumed from memory, per CLAUDE.md's
+// crate-verification rule extended to tree-sitter grammars.
+const RUBY_QUERY_SRC: &str = "
+(method) @item
+(singleton_method) @item
+(class) @item
+(module) @item
+";
+
+// Swift: `function_declaration` covers free functions *and* methods inside
+// a `class_declaration`'s body (this grammar unifies class/struct/enum/
+// extension under one `class_declaration` node kind, distinguished only by
+// a leaf keyword token, not a separate node type — confirmed via the
+// grammar's own `node-types.json`, not assumed). `protocol_declaration` is
+// Swift's interface-equivalent, same container/name shape as TS's
+// `interface_declaration`. `init_declaration`/`deinit_declaration` have no
+// `name` field at all (just literal `init`/`deinit` tokens) — `extract_name`
+// correctly falls through to `None` for those rather than guessing.
+const SWIFT_QUERY_SRC: &str = "
+(function_declaration) @item
+(class_declaration) @item
+(protocol_declaration) @item
+(init_declaration) @item
+(deinit_declaration) @item
+";
+
 fn kind_of(node_kind: &str) -> &'static str {
     match node_kind {
         "impl_item" => "impl",
-        "class_definition" | "class_declaration" | "class_specifier" => "class",
-        "interface_declaration" => "interface",
+        // Ruby's node kind is literally "class" (unlike every other grammar
+        // here, which names its class node after itself, e.g.
+        // "class_declaration") — added alongside rather than folded into
+        // that arm so the distinction stays visible.
+        "class_definition" | "class_declaration" | "class_specifier" | "class" => "class",
+        "interface_declaration" | "protocol_declaration" => "interface",
         "type_declaration" => "type",
         "enum_declaration" => "enum",
         "struct_specifier" => "struct",
+        "module" => "module",
         _ => "function",
     }
 }
@@ -172,8 +212,18 @@ fn is_container_kind(node_kind: &str) -> bool {
             // this never actually triggers for TS (see the TS query above).
             // Java's is different: default/static interface methods do have
             // a body and get matched, so this correctly swallows those into
-            // individual chunks the same way a class's methods do.
+            // individual chunks the same way a class's methods do. Swift's
+            // `protocol_declaration` behaves like Java's interface here:
+            // `protocol_function_declaration` (a signature, not matched by
+            // `SWIFT_QUERY_SRC`) never triggers this, but nothing stops a
+            // protocol body from containing other matched nodes in
+            // principle, so it's included for the same reason.
             | "interface_declaration"
+            | "protocol_declaration"
+            // Ruby: methods nest inside `class`/`module` bodies the same
+            // way rust impl/python class do.
+            | "class"
+            | "module"
     )
 }
 
@@ -414,7 +464,8 @@ fn outer() -> i32 {
 
     #[test]
     fn unsupported_extension_returns_none() {
-        assert!(chunk_source("rb", "def f; end").is_none());
+        // "cs" (C#) has no chunker yet — see gap #1, docs/feature-gaps.md.
+        assert!(chunk_source("cs", "void f() {}").is_none());
     }
 
     #[test]
@@ -424,7 +475,7 @@ fn outer() -> i32 {
 
     #[test]
     fn chunk_or_whole_file_falls_back_for_unsupported_language() {
-        let chunks = chunk_or_whole_file("rb", "def f; end\n");
+        let chunks = chunk_or_whole_file("cs", "void f() {}\n");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].kind, "file");
     }
@@ -751,5 +802,101 @@ int freeFunction(int x) {
         let source = "int *make_thing(int x) {\n    return 0;\n}\n";
         let chunks = chunk_source("c", source).expect("should produce chunks");
         assert_eq!(chunks[0].name.as_deref(), Some("make_thing"));
+    }
+
+    #[test]
+    fn ruby_methods_inside_a_class_become_individual_chunks() {
+        let source = r#"
+require "json"
+
+class Thing
+  def method_one
+    1
+  end
+
+  def method_two
+    2
+  end
+end
+"#;
+        let chunks = chunk_source("rb", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // no "class" chunk: Thing had matched method children, same
+        // swallowing behavior as rust impl / python class.
+        assert_eq!(kinds, vec!["file", "function", "function"]);
+
+        assert!(chunks[0].content.contains(r#"require "json""#));
+        assert!(chunks[1].content.contains("method_one"));
+        assert!(!chunks[1].content.contains("method_two"));
+        assert!(chunks[2].content.contains("method_two"));
+        assert_eq!(chunks[1].name.as_deref(), Some("method_one"));
+    }
+
+    #[test]
+    fn ruby_module_with_singleton_method() {
+        let source = r#"
+module Greeter
+  def self.greet(name)
+    "hi #{name}"
+  end
+end
+"#;
+        let chunks = chunk_source("rb", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // module has one matched child (the singleton method), so it's
+        // swallowed the same way a class with methods is.
+        assert_eq!(kinds, vec!["function"]);
+        assert_eq!(chunks[0].name.as_deref(), Some("greet"));
+    }
+
+    #[test]
+    fn swift_methods_inside_a_class_become_individual_chunks() {
+        let source = r#"
+import Foundation
+
+class Thing {
+    func methodOne() -> Int {
+        return 1
+    }
+
+    func methodTwo() -> Int {
+        return 2
+    }
+}
+"#;
+        let chunks = chunk_source("swift", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // no "class" chunk: Thing had matched function_declaration children,
+        // same swallowing behavior as every other container-kind language.
+        assert_eq!(kinds, vec!["file", "function", "function"]);
+
+        assert!(chunks[0].content.contains("import Foundation"));
+        assert!(chunks[1].content.contains("methodOne"));
+        assert!(!chunks[1].content.contains("methodTwo"));
+        assert!(chunks[2].content.contains("methodTwo"));
+        assert_eq!(chunks[1].name.as_deref(), Some("methodOne"));
+    }
+
+    #[test]
+    fn swift_protocol_becomes_its_own_chunk() {
+        let source = r#"
+protocol Greeter {
+    func greet(name: String) -> String
+}
+
+func useGreeter(g: Greeter) -> String {
+    return g.greet(name: "world")
+}
+"#;
+        let chunks = chunk_source("swift", source).expect("should produce chunks");
+        let kinds: Vec<&str> = chunks.iter().map(|c| c.kind.as_str()).collect();
+        // protocol_function_declaration (the signature inside the protocol
+        // body) is a different, unmatched node kind — the protocol has no
+        // matched children, so it stays one coherent "interface" chunk,
+        // same as Java's abstract-only interface case.
+        assert_eq!(kinds, vec!["interface", "function"]);
+        assert!(chunks[0].content.contains("protocol Greeter"));
+        assert_eq!(chunks[0].name.as_deref(), Some("Greeter"));
+        assert!(chunks[1].content.contains("useGreeter"));
     }
 }

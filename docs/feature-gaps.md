@@ -4,9 +4,13 @@ status: not exhaustive, this is the list that came out of a single review pass, 
 
 the core mechanism works and is genuinely differentiated: local opt-in watching, hybrid search, code-aware chunking, answer synthesis with citations, and a working mcp path for agents. these are the gaps worth closing before treating it as feature-complete for a broad public audience, not signs the foundation is weak.
 
-## 1. language coverage
+## 1. language coverage — partially closed (ruby, swift)
 
 function-level chunking covers rust, python, typescript, javascript, go, java, c, and c++. ruby and everything else still falls back to whole-file chunking, which is exactly the dilution problem chunking exists to solve in the first place (see `docs/code-aware-chunking.md`). most developers touch at least one language outside the original four. of everything on this page, this was the single gap most likely to make a new user bounce off immediately; the languages added this pass cover the large majority of that traffic, the rest are lower-traffic languages to pick up only as real need shows up.
+
+closed for ruby and swift, in a follow-up pass: ruby was the language explicitly named above as the most conspicuous gap (rails is still a large share of real-world code); swift was picked alongside it since this app is currently mac-only (see `docs/distribution.md`), so its actual install base skews toward mac devs, a meaningful share of whom write swift — an oddly specific gap for this app's own likely audience. Both added the same mechanical way every language here has been: one new tree-sitter grammar dependency (`tree-sitter-ruby`, `tree-sitter-swift`, `core/Cargo.toml`), one query constant, a branch in `chunk_source`'s extension dispatch (`core/src/chunk.rs`) — no schema/watcher/ui changes needed, that cost was paid once when the first language shipped (see `docs/code-aware-chunking.md`'s "phased language rollout" section for the full per-language breakdown, including the exact grammar node kinds each language matches on and how they were verified against the grammars' own `tags.scm`/`node-types.json`, not assumed).
+
+remaining, not started, lower priority than ruby/swift were: **c#** (large real-world share — unity, .net — currently getting whole-file treatment despite that), **php** (still runs a large share of the web, though skews less toward this app's likely audience), **kotlin** (android, similar reasoning to swift but a smaller expected overlap with a mac-first tool's userbase). all three have mature tree-sitter grammars available (`tree-sitter-c-sharp`, `tree-sitter-php`, `tree-sitter-kotlin`) — the remaining cost is the same shape as every language added so far, picked up only as real need shows up, same reasoning as this gap's original framing.
 
 ## 2. no folder scoping in the app itself — closed
 
