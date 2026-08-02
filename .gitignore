@@ -2,4 +2,3 @@
 .DS_Store
 /docs/*
 !/docs/mcp-agent-usage.md
-!/docs/paid-release-plan.md
