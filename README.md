@@ -6,7 +6,7 @@ a cross-platform desktop app that indexes your files locally and lets you search
 
 ## the problem
 
-existing ai-powered launchers (raycast's quick ai, spotlight, etc.) don't actually know anything about your files. ask raycast "what did i work on in vs code recently" and it has no index of your activity, it just tells you how to check manually (open file > open recent, run `git status`, etc.). that's a cloud llm wrapper with no real memory of your machine, not a tool that retrieves anything.
+existing ai-powered launchers (raycast's quick ai, spotlight, etc.) don't actually know anything about your files. ask raycast "how did i implement rate limiting here" and it has no index of your activity, it just tells you how to check manually (open file > open recent, run `git status`, etc.). that's a cloud llm wrapper with no real memory of your machine, not a tool that retrieves anything.
 
 this app is the real version: an actual local index of your files, kept current automatically, queryable with real semantic search, answered with citations back to the source file.
 
