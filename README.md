@@ -1,8 +1,8 @@
 # reference
 
-<img width="718" height="533" alt="Screenshot 2026-08-02 at 2 02 52 PM" src="https://github.com/user-attachments/assets/7807f502-7b99-4893-b4c5-911809834044" />
-
 a macOS app that indexes your files locally and lets you search them semantically. no cloud, no api calls, nothing leaves your machine.
+
+<img width="718" height="533" alt="Screenshot 2026-08-02 at 2 02 52 PM" src="https://github.com/user-attachments/assets/7807f502-7b99-4893-b4c5-911809834044" />
 
 ## the problem
 
@@ -91,6 +91,8 @@ pnpm tauri dev
 requires rust and pnpm installed. no python dependency anywhere in the pipeline.
 
 ## using the mcp server with an agent
+
+<img width="658" height="486" alt="Screenshot 2026-08-02 at 2 07 43 PM" src="https://github.com/user-attachments/assets/f5ce4a88-4a5c-410f-b185-a7ea5653d87f" />
 
 build it once:
 
