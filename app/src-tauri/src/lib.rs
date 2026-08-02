@@ -90,6 +90,12 @@ struct AppSettings {
     ranking_weights: RankingWeights,
     #[serde(default)]
     embedding_model: EmbeddingModel,
+    // Empty string means "no explicit choice made yet" — falls back to
+    // `DEFAULT_OPEN_ORDER`-style preference on the frontend, the same
+    // fallback an old settings file predating this field gets for free via
+    // `#[serde(default)]`.
+    #[serde(default)]
+    default_app: String,
 }
 
 fn load_app_settings() -> AppSettings {
@@ -116,6 +122,287 @@ fn save_embedding_model(model: EmbeddingModel) -> Result<(), String> {
     let mut settings = load_app_settings();
     settings.embedding_model = model;
     save_app_settings(&settings)
+}
+
+fn save_default_app(app_id: String) -> Result<(), String> {
+    let mut settings = load_app_settings();
+    settings.default_app = app_id;
+    save_app_settings(&settings)
+}
+
+#[derive(Serialize, Clone)]
+struct ExternalAppInfo {
+    id: String,
+    name: String,
+    // `None` when icon extraction fails (e.g. an app whose bundle has no
+    // plain `.icns` — some system apps ship icons only as a compiled asset
+    // catalog instead) — the frontend just renders the name with no icon
+    // rather than a broken image.
+    icon: Option<String>,
+}
+
+// Absolute paths are for Finder/Terminal, which ship with macOS itself, so
+// there's nothing to search for — `open_with_app` and `list_available_apps`
+// both just check the fixed path(s) exist. Bundle names are for everything
+// else, resolved under `app_search_dirs` at both list-time (to hide apps
+// that aren't installed) and open-time (to get the real path `open -a`
+// should launch, regardless of whether the app lives in /Applications or
+// ~/Applications).
+enum AppLocation {
+    Fixed(&'static [&'static str]),
+    Bundle(&'static [&'static str]),
+}
+
+// `uri_template` is `Some` only for editors that register their own
+// `<scheme>://file<path>:<line>:<col>` URL handler (verified against each
+// app's own docs, not guessed) — those get line/column jumps for free with
+// no shell-out; everything else just opens the file/bundle at line 1.
+struct ExternalAppSpec {
+    id: &'static str,
+    name: &'static str,
+    location: AppLocation,
+    uri_template: Option<&'static str>,
+}
+
+// Order here is also the order `list_available_apps` returns and the
+// frontend renders both the toolbar picker and the right-click "open with"
+// menu — matches the reference screenshot this was built from, with Zed
+// added alongside Cursor.
+const EXTERNAL_APPS: &[ExternalAppSpec] = &[
+    ExternalAppSpec {
+        id: "finder",
+        name: "Finder",
+        location: AppLocation::Fixed(&["/System/Library/CoreServices/Finder.app"]),
+        uri_template: None,
+    },
+    ExternalAppSpec {
+        id: "cursor",
+        name: "Cursor",
+        location: AppLocation::Bundle(&["Cursor.app"]),
+        uri_template: Some("cursor://file{path}:{line}:1"),
+    },
+    ExternalAppSpec {
+        id: "zed",
+        name: "Zed",
+        location: AppLocation::Bundle(&["Zed.app"]),
+        uri_template: Some("zed://file{path}:{line}:1"),
+    },
+    ExternalAppSpec {
+        id: "windsurf",
+        name: "Windsurf",
+        location: AppLocation::Bundle(&["Windsurf.app"]),
+        // Windsurf is a VS Code fork (Codeium), same lineage as Cursor —
+        // its `windsurf://` handler is confirmed to exist, but unlike the
+        // other line-jump templates here, this exact path:line:col syntax
+        // is inferred from the shared VS Code fork lineage, not confirmed
+        // against Windsurf's own docs. Worth double-checking if it doesn't
+        // land on the right line.
+        uri_template: Some("windsurf://file{path}:{line}:1"),
+    },
+    ExternalAppSpec {
+        id: "vscode",
+        name: "VS Code",
+        location: AppLocation::Bundle(&["Visual Studio Code.app"]),
+        uri_template: Some("vscode://file{path}:{line}:1"),
+    },
+    ExternalAppSpec {
+        id: "xcode",
+        name: "Xcode",
+        location: AppLocation::Bundle(&["Xcode.app"]),
+        uri_template: None,
+    },
+    ExternalAppSpec {
+        id: "sublime",
+        name: "Sublime Text",
+        location: AppLocation::Bundle(&["Sublime Text.app"]),
+        uri_template: None,
+    },
+    ExternalAppSpec {
+        id: "terminal",
+        name: "Terminal",
+        location: AppLocation::Fixed(&[
+            "/System/Applications/Utilities/Terminal.app",
+            "/Applications/Utilities/Terminal.app",
+        ]),
+        uri_template: None,
+    },
+    ExternalAppSpec {
+        id: "jetbrains",
+        name: "JetBrains",
+        // No single bundle name — whichever JetBrains IDE is actually
+        // installed, opened via its real path so `open -a` doesn't depend
+        // on it being registered under a generic "JetBrains" name it never
+        // uses.
+        location: AppLocation::Bundle(&[
+            "IntelliJ IDEA.app",
+            "IntelliJ IDEA CE.app",
+            "WebStorm.app",
+            "PyCharm.app",
+            "PyCharm CE.app",
+            "GoLand.app",
+            "CLion.app",
+            "RustRover.app",
+            "PhpStorm.app",
+            "RubyMine.app",
+            "DataGrip.app",
+            "Rider.app",
+            "Android Studio.app",
+        ]),
+        uri_template: None,
+    },
+];
+
+fn app_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("/Applications")];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join("Applications"));
+    }
+    dirs
+}
+
+fn find_app_bundle(candidates: &[&str]) -> Option<PathBuf> {
+    for dir in app_search_dirs() {
+        for name in candidates {
+            let path = dir.join(name);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_bundle(location: &AppLocation) -> Option<PathBuf> {
+    match location {
+        AppLocation::Fixed(paths) => paths.iter().map(PathBuf::from).find(|p| p.exists()),
+        AppLocation::Bundle(names) => find_app_bundle(names),
+    }
+}
+
+fn icon_cache_path(app_id: &str) -> PathBuf {
+    paths::default_app_data_dir().join("app-icons").join(format!("{app_id}.png"))
+}
+
+// Extracts an app's own icon straight from its bundle rather than shipping
+// bundled logo assets for each app — this is the same icon macOS's own
+// "Open With" menu shows, stays correct for whichever JetBrains IDE was
+// actually detected, and needs no upkeep as apps change their branding.
+// `plutil`/`sips` are macOS system tools (this whole feature is macOS-only,
+// see `open -a`/`open -R` above), not an added dependency. Cached to disk
+// since bundle icons don't change while the app is running.
+fn extract_app_icon_png(app_id: &str, bundle: &Path) -> Option<PathBuf> {
+    use std::process::Command;
+
+    let cache = icon_cache_path(app_id);
+    if cache.exists() {
+        return Some(cache);
+    }
+
+    let info_plist = bundle.join("Contents/Info.plist");
+    let output = Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(&info_plist).output().ok()?;
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let icon_name = info.get("CFBundleIconFile")?.as_str()?;
+    let icon_file =
+        if icon_name.ends_with(".icns") { icon_name.to_string() } else { format!("{icon_name}.icns") };
+    let icns_path = bundle.join("Contents/Resources").join(&icon_file);
+    if !icns_path.exists() {
+        return None;
+    }
+
+    std::fs::create_dir_all(cache.parent()?).ok()?;
+    // Capped at 128px — plenty for both the toolbar button and a native
+    // menu item icon at any Retina scale, and far smaller than the
+    // multi-size icon families .icns bundles actually ship (often 512-1024px),
+    // which would otherwise get base64-inlined into every settings/menu
+    // response at full size for no visual benefit.
+    let status = Command::new("sips")
+        .args(["-s", "format", "png", "-Z", "128"])
+        .arg(&icns_path)
+        .arg("--out")
+        .arg(&cache)
+        .output()
+        .ok()?;
+    (status.status.success() && cache.exists()).then_some(cache)
+}
+
+fn app_icon_data_uri(app_id: &str, bundle: &Path) -> Option<String> {
+    use base64::Engine;
+
+    let icon_path = extract_app_icon_png(app_id, bundle)?;
+    let bytes = std::fs::read(icon_path).ok()?;
+    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+#[tauri::command]
+fn list_available_apps() -> Vec<ExternalAppInfo> {
+    EXTERNAL_APPS
+        .iter()
+        .filter_map(|spec| {
+            let bundle = resolve_bundle(&spec.location)?;
+            Some(ExternalAppInfo {
+                id: spec.id.into(),
+                name: spec.name.into(),
+                icon: app_icon_data_uri(spec.id, &bundle),
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_default_app() -> String {
+    load_app_settings().default_app
+}
+
+#[tauri::command]
+fn set_default_app(app_id: String) -> Result<(), String> {
+    save_default_app(app_id)
+}
+
+// `line` is ignored for every app whose spec has no `uri_template` — Xcode,
+// Sublime, JetBrains, Finder and Terminal all just get the plain path (or,
+// for Terminal, the path's containing directory — there's no shell command
+// language-agnostic enough to "open a terminal here at this line").
+#[tauri::command]
+fn open_with_app(path: String, line: usize, app_id: String) -> Result<(), String> {
+    use std::process::Command;
+
+    let spec =
+        EXTERNAL_APPS.iter().find(|s| s.id == app_id).ok_or_else(|| format!("unknown app: {app_id}"))?;
+
+    match app_id.as_str() {
+        "finder" => {
+            Command::new("open").arg("-R").arg(&path).spawn().map_err(|e| e.to_string())?;
+        }
+        "terminal" => {
+            let dir = Path::new(&path)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(&path));
+            let bundle = resolve_bundle(&spec.location).ok_or("Terminal is not installed")?;
+            Command::new("open")
+                .arg("-a")
+                .arg(bundle)
+                .arg(&dir)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        _ => {
+            if let Some(template) = spec.uri_template {
+                let url = template.replace("{path}", &path).replace("{line}", &line.to_string());
+                Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
+            } else {
+                let bundle = resolve_bundle(&spec.location)
+                    .ok_or_else(|| format!("{} is not installed", spec.name))?;
+                Command::new("open")
+                    .arg("-a")
+                    .arg(bundle)
+                    .arg(&path)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -786,7 +1073,11 @@ pub fn run() {
             set_ranking_weights,
             list_embedding_models,
             get_embedding_model,
-            set_embedding_model
+            set_embedding_model,
+            list_available_apps,
+            get_default_app,
+            set_default_app,
+            open_with_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
@@ -135,15 +134,135 @@ interface EmbeddingModelInfo {
   display_name: string;
 }
 
-// VSCode registers this URI scheme itself; no shell-out or `code` CLI
-// dependency needed. Falls back to just opening the file if the line lookup
-// or the open itself fails, rather than doing nothing.
-async function openInEditor(path: string, line: number) {
+interface ExternalAppInfo {
+  id: string;
+  name: string;
+  // Extracted straight from the app's own bundle (see `app_icon_data_uri`
+  // in lib.rs) as a data URI — `null` on the rare bundle where extraction
+  // fails, in which case the picker just shows the name with no icon.
+  icon: string | null;
+}
+
+// Populated once at startup from `list_available_apps` (Rust-side detection
+// of which of these are actually installed) — not editable here, so a left
+// click, right-click menu, or the toolbar picker built before that first
+// load just sees an empty list rather than guessing.
+let availableApps: ExternalAppInfo[] = [];
+// Mirrors `default_app` in the persisted settings file. Empty string means
+// no explicit pick yet, in which case `defaultApp()` falls back to
+// `DEFAULT_OPEN_ORDER` — the same state a settings file predating this
+// field is in.
+let defaultAppId = "";
+
+async function loadAvailableApps() {
   try {
-    await openUrl(`vscode://file${path}:${line}:1`);
+    availableApps = await invoke<ExternalAppInfo[]>("list_available_apps");
+    defaultAppId = await invoke<string>("get_default_app");
   } catch (err) {
-    console.error("openInEditor failed", err);
+    console.error("failed to load available apps", err);
   }
+  updateOpenInButton();
+}
+
+// Preference order used only until the user actually picks a default via
+// the toolbar dropdown — editors that can jump straight to a line win over
+// ones that can only open the whole file.
+const DEFAULT_OPEN_ORDER = ["vscode", "cursor", "zed"];
+
+function defaultApp(): ExternalAppInfo | null {
+  const explicit = availableApps.find((a) => a.id === defaultAppId);
+  if (explicit) return explicit;
+  for (const id of DEFAULT_OPEN_ORDER) {
+    const match = availableApps.find((a) => a.id === id);
+    if (match) return match;
+  }
+  return availableApps[0] ?? null;
+}
+
+async function openWithApp(path: string, line: number, appId: string) {
+  try {
+    await invoke("open_with_app", { path, line, appId });
+  } catch (err) {
+    console.error("open_with_app failed", err);
+  }
+}
+
+async function openInEditor(path: string, line: number) {
+  const app = defaultApp();
+  if (!app) return;
+  await openWithApp(path, line, app.id);
+}
+
+// A native OS context menu (via `@tauri-apps/api/menu`) can't be themed —
+// its background/highlight color always comes from the system, not this
+// app's own dark palette — so both the right-click "open with" popup and
+// the toolbar default-app picker use this instead: a plain HTML overlay,
+// icon-only (app icons are already self-explanatory, a text label next to
+// each one is redundant), positioned at a point rather than docked into
+// #results. Only one open at a time; closing on outside click or Escape.
+let appPopupEl: HTMLElement | null = null;
+
+function closeAppPopup() {
+  if (!appPopupEl) return;
+  appPopupEl.remove();
+  appPopupEl = null;
+  window.removeEventListener("mousedown", handleAppPopupOutsideClick, true);
+}
+
+function handleAppPopupOutsideClick(e: MouseEvent) {
+  if (appPopupEl && !appPopupEl.contains(e.target as Node)) closeAppPopup();
+}
+
+// `x`/`y` is the popup's top-left corner unless `alignRight` is set, in
+// which case `x` is its right edge instead — lets the toolbar picker hang
+// off the button it was opened from without spilling past the window's
+// right edge, the same way the right-click popup is positioned exactly at
+// the cursor.
+function showAppPopup(x: number, y: number, alignRight: boolean, onSelect: (appId: string) => void) {
+  closeAppPopup();
+  if (availableApps.length === 0) return;
+
+  const popup = document.createElement("div");
+  popup.className = "app-popup";
+
+  for (const app of availableApps) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "app-popup-icon";
+    btn.title = app.name;
+    if (app.icon) {
+      const img = document.createElement("img");
+      img.src = app.icon;
+      img.alt = app.name;
+      btn.appendChild(img);
+    }
+    const label = document.createElement("span");
+    label.className = "app-popup-name";
+    label.textContent = app.name;
+    btn.appendChild(label);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onSelect(app.id);
+      closeAppPopup();
+    });
+    popup.appendChild(btn);
+  }
+
+  document.body.appendChild(popup);
+  appPopupEl = popup;
+
+  const rect = popup.getBoundingClientRect();
+  const left = alignRight ? x - rect.width : x;
+  const maxLeft = window.innerWidth - rect.width - 4;
+  const maxTop = window.innerHeight - rect.height - 4;
+  popup.style.left = `${Math.min(Math.max(4, left), maxLeft)}px`;
+  popup.style.top = `${Math.min(Math.max(4, y), maxTop)}px`;
+
+  window.addEventListener("mousedown", handleAppPopupOutsideClick, true);
+}
+
+function showOpenWithMenu(x: number, y: number, path: string, line: number) {
+  showAppPopup(x, y, false, (appId) => openWithApp(path, line, appId));
 }
 
 // Lucide's "copy" icon, inlined the same way the folder-mode "x" icon is
@@ -219,12 +338,17 @@ let currentQuery = "";
 // checkboxes — one button, no selection state to manage or clean up.
 let lastResponse: SearchResponse | null = null;
 
+// Same gate for both buttons — the "open in" picker only makes sense once
+// there's an actual file/chunk on screen to open, exactly the condition
+// that already governs the copy-all button, so this doubles as its
+// visibility check too rather than duplicating the same `hasContent` logic
+// under a second name.
 function updateCopyAllVisibility() {
-  if (!copyAllBtnEl) return;
   const hasContent =
     !!lastResponse &&
     lastResponse.citations.length + lastResponse.results.length > 0;
-  copyAllBtnEl.classList.toggle("visible", hasContent);
+  copyAllBtnEl?.classList.toggle("visible", hasContent);
+  openInBtnEl?.classList.toggle("visible", hasContent);
 }
 
 // Gathers every citation and result currently shown into one clipboard
@@ -280,18 +404,19 @@ async function copyAllVisible() {
 // its exact start line from the index — no need to re-score the file
 // line-by-line at click time the way plain "file"-kind results (unchunked
 // languages, prose) still do.
-async function openResultInEditor(result: SearchResult, query: string) {
-  if (result.chunk_kind !== "file") {
-    await openInEditor(result.path, result.start_line);
-    return;
-  }
+async function resolveResultLine(result: SearchResult, query: string): Promise<number> {
+  if (result.chunk_kind !== "file") return result.start_line;
 
-  let line = 1;
   try {
-    line = await invoke<number>("find_line", { path: result.path, query });
+    return await invoke<number>("find_line", { path: result.path, query });
   } catch (err) {
     console.error("find_line failed", err);
+    return 1;
   }
+}
+
+async function openResultInEditor(result: SearchResult, query: string) {
+  const line = await resolveResultLine(result, query);
   await openInEditor(result.path, line);
 }
 
@@ -307,6 +432,8 @@ let resultsEl: HTMLElement | null;
 let copyAllBtnEl: HTMLButtonElement | null;
 let scopeBtnEl: HTMLButtonElement | null;
 let scopeLabelEl: HTMLElement | null;
+let openInBtnEl: HTMLButtonElement | null;
+let openInIconEl: HTMLImageElement | null;
 let settingsBtnEl: HTMLButtonElement | null;
 let updateDotEl: HTMLElement | null;
 let indexProgressEl: HTMLElement | null;
@@ -468,6 +595,32 @@ function selectScope(value: string) {
   searchScope = value;
   updateScopeButton();
   closeScopeMenu();
+}
+
+// Sets the toolbar button's own icon to whatever `defaultApp()` currently
+// resolves to — called after apps first load and after every pick, so the
+// button always shows the app a plain click would actually open.
+function updateOpenInButton() {
+  if (!openInIconEl) return;
+  const app = defaultApp();
+  openInIconEl.src = app?.icon ?? "";
+  openInIconEl.style.visibility = app?.icon ? "visible" : "hidden";
+}
+
+function openAppPicker() {
+  if (!openInBtnEl) return;
+  const rect = openInBtnEl.getBoundingClientRect();
+  showAppPopup(rect.right, rect.bottom + 6, true, (appId) => selectDefaultApp(appId));
+}
+
+async function selectDefaultApp(appId: string) {
+  defaultAppId = appId;
+  updateOpenInButton();
+  try {
+    await invoke("set_default_app", { appId });
+  } catch (err) {
+    console.error("set_default_app failed", err);
+  }
 }
 
 let settingsMode = false;
@@ -854,6 +1007,10 @@ function renderCitation(citation: Citation, query: string): HTMLElement {
   li.addEventListener("click", () =>
     openInEditor(citation.path, citation.start_line),
   );
+  li.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showOpenWithMenu(e.clientX, e.clientY, citation.path, citation.start_line);
+  });
 
   // A "file"-kind citation is prose (or an unchunked language's whole-file
   // blob) — rendered as inline markdown same as before. Anything else came
@@ -924,6 +1081,12 @@ function renderResponse(response: SearchResponse, query: string) {
     li.className = "result clickable";
     li.title = `open ${basename(r.path)}`;
     li.addEventListener("click", () => openResultInEditor(r, query));
+    li.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const x = e.clientX;
+      const y = e.clientY;
+      resolveResultLine(r, query).then((line) => showOpenWithMenu(x, y, r.path, line));
+    });
     const idx = resultRows.push(li) - 1;
     li.addEventListener("mouseenter", () => {
       resultSelectedIndex = idx;
@@ -1309,6 +1472,8 @@ window.addEventListener("DOMContentLoaded", () => {
   copyAllBtnEl = document.querySelector("#copy-all-btn");
   scopeBtnEl = document.querySelector("#scope-btn");
   scopeLabelEl = document.querySelector("#scope-label");
+  openInBtnEl = document.querySelector("#open-in-btn");
+  openInIconEl = document.querySelector("#open-in-icon");
   settingsBtnEl = document.querySelector("#settings-btn");
   updateDotEl = document.querySelector("#update-dot");
   indexProgressEl = document.querySelector("#index-progress");
@@ -1336,9 +1501,15 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  openInBtnEl?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openAppPicker();
+  });
+
   refreshWatchedFolders();
   loadRankingWeights();
   loadEmbeddingModels();
+  loadAvailableApps();
   checkForAppUpdate();
   pollIndexingProgress();
   setInterval(pollIndexingProgress, 500);
@@ -1349,6 +1520,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // overlay.
     if (scopePickerOpen) scopePickerOpen = false;
     if (settingsMode) settingsMode = false;
+    closeAppPopup();
 
     if (folderMode) {
       updateFolderSuggestions();
@@ -1365,6 +1537,8 @@ window.addEventListener("DOMContentLoaded", () => {
         closeScopeMenu();
       } else if (settingsMode) {
         closeSettingsMode();
+      } else if (appPopupEl) {
+        closeAppPopup();
       } else {
         getCurrentWindow().close();
       }

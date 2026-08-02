@@ -521,6 +521,104 @@ body {
   color: #2f83fc;
 }
 
+/* No background/circle — the app's own icon (already a rounded-square
+   macOS icon) is the whole visual, so a frame around it would just be a
+   second rounded-square nested inside the icon's own rounded-square edge.
+   Hover/active feedback is a scale bump instead of a background fill for
+   the same reason. Hidden/shown on the same `hasContent` condition as
+   .copy-all-btn (see updateCopyAllVisibility in main.ts) — there's nothing
+   to open in anything until a search actually returns a file or chunk. */
+.open-in-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.9);
+  transition: opacity 0.12s, transform 0.12s;
+}
+
+.open-in-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+
+.open-in-btn:hover,
+.open-in-btn.active {
+  transform: scale(1.08);
+}
+
+.open-in-icon {
+  display: block;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+}
+
+/* Fixed-position overlay (appended to <body>, not #results — see
+   showAppPopup in main.ts) so it can float over whatever's on screen at an
+   exact point (the cursor for a right-click, the toolbar button for the
+   default-app picker) instead of pushing into the window's own
+   resize-to-fit-content layout. #2a2a2a instead of the app's base #212121
+   (see the body background comment above) gives it just enough lift to
+   read as "floating above" rather than blending into the panel behind it,
+   while staying in the same flat, no-vibrancy family as the rest of the
+   UI — a native OS context menu can't be recolored to match this, which is
+   the whole reason this exists instead of one. */
+.app-popup {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: #2a2a2a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.app-popup-icon {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+
+.app-popup-icon:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.app-popup-icon img {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.app-popup-name {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+}
+
 /* Unlike .copy-all-btn, always visible rather than hidden until there's
    content — ranking weights are relevant regardless of what's currently
    on screen, so there's no "nothing to act on yet" state to hide behind. */
