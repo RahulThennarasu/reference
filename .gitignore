@@ -1,2 +1,4 @@
 /target
 .DS_Store
+/docs/*
+!/docs/mcp-agent-usage.md

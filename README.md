@@ -12,76 +12,106 @@ this app is the real version: an actual local index of your files, kept current 
 
 ## core idea
 
-- you pick which folders to index (opt-in, never automatic)
+- you pick which folders to index (opt in, never automatic): type a path into the folder field, press **tab** to autocomplete/step into a folder, press **enter** to start watching it
 - a background daemon watches those folders in real time and embeds new/changed files as they happen
 - search combines fast fuzzy filename matching with gpu-accelerated semantic search
 - question-shaped queries get a synthesized answer with clickable source citations
 - everything runs locally, embeddings, storage, and search never touch the network
 
-## why not just use raycast / spotlight / cloud rag tools?
+## why not just use raycast / spotlight / cloud rag tools
 
-- **raycast is mac-only** and its "ai" features are thin wrappers around cloud apis, not a real local index.
-- **cloud rag tools** require your files to leave the machine, which is a non-starter for code and private notes.
-- **this app is cross-platform first**, genuinely good on windows/nvidia hardware, not a mac-only tool with windows as an afterthought.
+- raycast is mac only and its "ai" features are thin wrappers around cloud apis, not a real local index
+- cloud rag tools require your files to leave the machine, a non starter for code and private notes
+- this app is cross-platform first, genuinely good on windows/nvidia hardware, not a mac-only tool with windows as an afterthought
 
 ## tech stack
 
 | piece           | choice                    | why                                                                                                                                                   |
-| --------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| --------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | app shell       | tauri (rust)              | lightweight cross-platform desktop shell, avoids bundling a python runtime                                                                            |
 | file watching   | `notify` crate            | cross-platform filesystem event watching                                                                                                              |
 | embeddings      | `candle` (rust-native ml) | cuda support on pc, metal support on mac, no python dependency                                                                                        |
 | embedding model | all-minilm-l6-v2          | smallest, fastest, most battle-tested with candle, safest starting point                                                                              |
-| vector storage  | lancedb (rust crate)      | embedded (in-process, no server), native rust bindings, hybrid vector + metadata filtering, versioned storage                                         |
-| upsert behavior | `table::merge_insert`     | confirmed available in the current lancedb rust crate (v0.31.0), handles "file changed, re-embed it" as a delete-then-upsert keyed on path + start line, since one file is now many chunk rows |
-| code chunking    | `tree-sitter`             | parses rust/python/typescript/javascript/go/java/c/c++/ruby/swift into function/class-level chunks instead of embedding a whole file as one vector, see `docs/code-aware-chunking.md` |
-| agent access    | `rmcp` (official Rust MCP SDK) | replaces the removed `reference-cli`; a long-running MCP server keeps the embedding model warm across calls instead of reloading it per invocation, see `docs/mcp-agent-usage.md` |
+| vector storage  | lancedb (rust crate)      | embedded (in process, no server), native rust bindings, hybrid vector + metadata filtering, versioned storage                                         |
+| upsert behavior | `table::merge_insert`     | handles "file changed, re-embed it" as a delete-then-upsert keyed on path + start line, since one file is now many chunk rows                          |
+| code chunking   | `tree-sitter`             | parses rust, python, typescript, javascript, go, java, c, c++, ruby, and swift into function/class-level chunks instead of embedding a whole file as one vector |
+| agent access    | `rmcp` (official rust mcp sdk) | a long-running mcp server keeps the embedding model warm across calls instead of reloading it per invocation                                    |
 
-## core features (v1 scope)
+## core features
 
-- folder-level opt-in indexing
+- folder-level opt in indexing
 - real-time file watching (background daemon, not manual re-scan)
 - local gpu-accelerated embeddings (cuda / metal)
 - hybrid search: fast fuzzy filename match + semantic match
 - code-aware chunking: search and cite exact functions/classes, not just whole files
 - answer synthesis with source citations, linking back to the actual file, code citations are syntax-highlighted with a high-contrast palette tuned for the app's dark theme
-- a "send to agent" button on every result and citation: copies a formatted query + code/line-range context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent (claude code, codex, etc.) they're using
-- pick which app opens a result: right-click a result/citation for an "open with" popup, or use the toolbar button to set the default a plain click uses. lists whatever's actually installed (Finder, Cursor, Zed, VS Code, Windsurf, Xcode, Sublime Text, Terminal, any JetBrains IDE) with real icons extracted from each app's own bundle — no hardcoded logos, no dependency on any one editor being installed to open results at all
-- an MCP server (`mcp/`) exposing four read-only tools over the same index, for agents to query directly mid-task instead of shelling out to a CLI: `search` for natural-language lookup (with an `exclude_folder` param for cross-repo recall — "how did I solve this in a different project"), `explain` for citation synthesis regardless of query phrasing (`search` only synthesizes for question-shaped queries), `find_similar` for finding near-duplicate chunks given one already found, `check_doc_drift` for flagging a doc chunk that no longer scores close to the code it describes. `cargo build -p reference-mcp` once, then register it yourself with `claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp` — see `docs/mcp-agent-usage.md` for the full setup
+- a "send to agent" button on every result and citation: copies a formatted query and code/line-range context to the clipboard, so a human who found the right chunk can hand it straight to whatever coding agent they're using
+- pick which app opens a result: right-click a result/citation for an "open with" popup, or use the toolbar button to set the default a plain click uses. lists whatever's actually installed (finder, cursor, zed, vs code, windsurf, xcode, sublime text, terminal, any jetbrains ide) with real icons extracted from each app's own bundle, no hardcoded logos, no dependency on any one editor being installed
+- an mcp server exposing four read-only tools over the same index, for agents to query directly mid-task: `search` for natural-language lookup (with an `exclude_folder` param for cross-repo recall), `explain` for citation synthesis regardless of query phrasing, `find_similar` for finding near-duplicate chunks given one already found, `check_doc_drift` for flagging a doc chunk that no longer scores close to the code it describes
 
-## explicitly out of scope for v1
+## explicitly out of scope
 
 - cloud sync/backup of the index (undermines the whole privacy pitch)
 - general-purpose chatbot mode (scope creep away from "search my stuff")
-- auto-indexing everything by default (erodes trust, opt-in only)
-- a persistent "nothing leaves this machine" status indicator in the main ui (redundant clutter, anyone who installed a local-only tool already knows the deal, this can live one layer down in settings if at all)
+- auto-indexing everything by default (erodes trust, opt in only)
+- a persistent "nothing leaves this machine" status indicator in the main ui (redundant clutter, anyone who installed a local-only tool already knows the deal)
 
 ## later / stretch ideas
 
 - multi-machine indexing (search across a mac and a pc you own)
 - structured fact extraction (claims with provenance, not just chunk retrieval)
 - plugin/extension model for new source types (notion, browser history, calendar)
-- natural-language file actions (rename, move), bigger scope jump into agent territory, not v1
-- directly launching a coding agent with context (not just clipboard hand-off), scoped to claude code specifically since there's no universal way to inject a prompt into an arbitrary running agent session
+- natural-language file actions (rename, move)
+- directly launching a coding agent with context, not just clipboard hand-off
 
 ## current status
 
-watch, embed, store, and hybrid search all work end-to-end through the tauri app, backed by one index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, javascript, go, java, c, c++, ruby, and swift (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result. the `reference-cli` binary (a shell-out-and-parse-json interface for coding agents) has been removed in favor of an MCP server (`mcp/`, package `reference-mcp`) exposing the same search plus a `find_similar` near-duplicate lookup and a `check_doc_drift` staleness check over the same index, keeping the embedding model warm across calls instead of reloading it per invocation like the old CLI did.
+watch, embed, store, and hybrid search all work end to end through the tauri app, backed by one local index (`~/.reference/`). code is chunked at function/class granularity for rust, python, typescript, javascript, go, java, c, c++, ruby, and swift (prose and other languages still index as one whole-file chunk). answer synthesis cites exact chunks, syntax-highlighted in the app, with a send-to-agent clipboard button on every result.
 
-everything lives under `~/.reference/`: `watched_folders.json` is the plain-text list of folders you've added via the app (⌘7), `index/` is the actual lancedb table (paths + chunks + embeddings). removing a folder from the app (the x button) doesn't just stop watching it — it purges every already-indexed row for that folder from `index/` too, so nothing stale is left searchable after you remove it.
+everything lives under `~/.reference/`: `watched_folders.json` is the plain-text list of folders you've added via the app, `index/` is the actual lancedb table (paths, chunks, and embeddings). removing a folder from the app doesn't just stop watching it, it purges every already-indexed row for that folder from `index/` too, so nothing stale is left searchable after you remove it.
 
-signed and notarized locally (`pnpm tauri build` with a "Developer ID Application" cert + `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`/`APPLE_SIGNING_IDENTITY` exported — see `docs/distribution.md`), so the built `.app`/`.dmg` runs on any mac without a gatekeeper warning; there's just no automated release workflow yet (still a manual local build, not triggered by a version tag push). a release build currently produces a ~202mb `.app`, down from an initial ~220mb *single-binary* build before tuning `[profile.release]` (`strip`, `lto`, `codegen-units = 1`) — that tuning still applies today (`reference-app` alone is ~108mb), but the bundle now also ships a second, similarly-sized `reference-mcp` sidecar binary (~94mb, `Contents/MacOS/reference-mcp`, via tauri's `externalBin` mechanism, `app/src-tauri/scripts/prepare-mcp-sidecar.sh`, run automatically before every `tauri build`) so the two together land back near where the single binary started. both binaries separately statically link candle, lancedb (arrow + datafusion + lance), and four tree-sitter grammars, since `reference-mcp` needs the full search/store/embedding stack to run standalone over stdio — see below for how to point claude code at it.
+there's a menu bar tray icon (the pixelated `&` mark) alongside the dock icon, click it to show/focus the main window. closing the window hides it instead of quitting the app, specifically so the tray icon has a window to bring back; quit fully via the dock icon or cmd+q.
 
-there's a menu bar tray icon (the pixelated `&` mark, `app/src-tauri/icons/tray-icon.png`) alongside the dock icon — click it to show/focus the main window. closing the window hides it instead of quitting the app, specifically so the tray icon has a window to bring back; quit fully via the dock icon or Cmd+Q.
+## adding a folder to watch
 
-## using the mcp server with claude code
+open the folder picker (⌘7), type or paste a path, then:
 
-once you have the app built/installed (see above — no packaged installer yet, so this still means building from source for now), the `reference-mcp` binary is already inside the app bundle, verified at `Contents/MacOS/reference-mcp`, right alongside the main app binary:
+- **tab** — autocomplete the path / step into the highlighted folder
+- **enter** — start watching the current path
+
+## building from source
 
 ```
-claude mcp add --scope user reference-mcp -- /path/to/reference.app/Contents/MacOS/reference-mcp
+git clone <this repo>
+cd reference/app
+pnpm install
+pnpm tauri dev
 ```
 
-(on a normal install this would be `/Applications/reference.app/Contents/MacOS/reference-mcp`; adjust the path to wherever your build landed, e.g. `target/debug/bundle/macos/reference.app/...` for a local dev build).
+requires rust and pnpm installed. no python dependency anywhere in the pipeline.
 
-verify with `claude mcp list` — should show `reference-mcp ✔ Connected`. it only searches folders you've already added to the app (⌘7); see `docs/mcp-agent-usage.md` for the full tool reference, the `/refsearch`, `/explain`, `/findsimilar`, `/checkdocdrift`, and `/recall` commands, and caveats.
+## using the mcp server with an agent
+
+build it once:
+
+```
+cargo build -p reference-mcp
+```
+
+then register it with claude code:
+
+```
+claude mcp add --scope local reference-mcp -- ${CLAUDE_PROJECT_DIR:-.}/target/debug/reference-mcp
+```
+
+or, if you're using the installed app instead of a source build, the `reference-mcp` binary ships inside the app bundle at `Contents/MacOS/reference-mcp`:
+
+```
+claude mcp add --scope user reference-mcp -- /Applications/reference.app/Contents/MacOS/reference-mcp
+```
+
+it only searches folders you've already added to the app. exposes four tools: `search`, `explain`, `find_similar`, and `check_doc_drift`.
+
+## license
+
+business source license 1.1 (`LICENSE`). free to use, copy, and modify for personal, educational, or evaluation purposes. reselling or redistributing it as your own product or service requires a separate commercial license. converts to apache 2.0 on 2030-08-01.

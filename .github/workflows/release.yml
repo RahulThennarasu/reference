@@ -5,8 +5,9 @@ name: release
 # the mac app exactly like a local `pnpm tauri build` (docs/distribution.md
 # sections 1-3, already verified working locally), then publishes the
 # .dmg + a signed `latest.json` update manifest to the public
-# RahulThennarasu/reference-macos repo (kept separate from this private
-# source repo per docs/download-page-usage-terms.md). tauri-plugin-updater
+# RahulThennarasu/reference-macos repo (kept separate from this source
+# repo so the update manifest lives somewhere a real user's updater talks
+# to). tauri-plugin-updater
 # (app/src-tauri/tauri.conf.json) polls that repo's
 # releases/latest/download/latest.json for new versions.
 on:
