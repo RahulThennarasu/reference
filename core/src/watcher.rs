@@ -346,10 +346,21 @@ pub async fn watch(
                 continue;
             }
             let mtime = file_mtime(path).unwrap_or(0);
+            let path_key = path.to_string_lossy().to_string();
+            // A single save can fire several distinct notify events for the
+            // same path (editors commonly touch metadata separately from
+            // content, or emit both a Create and a Modify for one write) —
+            // without this, one `Cmd+S` re-embeds the same unchanged content
+            // several times in a row. Safe to skip on an exact mtime match:
+            // this is the live path, so the file's content genuinely hasn't
+            // changed since the last time this same mtime was indexed.
+            if last_mtime.get(&path_key) == Some(&mtime) {
+                continue;
+            }
             if let Err(e) = index_file(embedder, store, path, mtime).await {
                 eprintln!("failed to index {}: {e}", path.display());
             } else {
-                last_mtime.insert(path.to_string_lossy().to_string(), mtime);
+                last_mtime.insert(path_key, mtime);
             }
         }
     }
