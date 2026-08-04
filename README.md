@@ -116,4 +116,4 @@ it only searches folders you've already added to the app. exposes four tools: `s
 
 ## license
 
-business source license 1.1 (`LICENSE`). free to use, copy, and modify for personal, educational, or evaluation purposes. reselling or redistributing it as your own product or service requires a separate commercial license. converts to apache 2.0 on 2030-08-01.
+elastic license 2.0 (`LICENSE`). free to use, copy, modify, and distribute. can't offer it to third parties as a hosted or managed service, and can't circumvent license key functionality.
