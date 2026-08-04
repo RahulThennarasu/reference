@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{
-    cast::AsArray, types::Float32Type, BooleanArray, FixedSizeListArray, Int32Array, RecordBatch,
-    RecordBatchIterator, StringArray,
+    cast::AsArray, types::Float32Type, BooleanArray, FixedSizeListArray, Int32Array, Int64Array,
+    RecordBatch, RecordBatchIterator, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -76,6 +76,7 @@ pub struct HybridHit {
     pub chunk_kind: String,
     pub name: String,
     pub truncated: bool,
+    pub mtime: i64,
 }
 
 /// One chunk of a file (a function, an impl block, or the whole file as a
@@ -97,6 +98,12 @@ pub struct ChunkRecord {
     pub embedding: Vec<f32>,
     pub name: String,
     pub truncated: bool,
+    /// The source file's on-disk mtime (Unix epoch seconds) at the moment
+    /// this chunk was embedded — not when the row was written. Lets a
+    /// reader (the live watcher's own re-scan, or an MCP caller) tell "this
+    /// row reflects the file as of mtime X" apart from "the file's current
+    /// on-disk mtime is Y," instead of only ever trusting the index blindly.
+    pub mtime: i64,
 }
 
 pub struct Store {
@@ -112,6 +119,7 @@ fn schema() -> SchemaRef {
         Field::new("content", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("truncated", DataType::Boolean, false),
+        Field::new("mtime", DataType::Int64, false),
         Field::new(
             "embedding",
             DataType::FixedSizeList(
@@ -134,7 +142,7 @@ fn schema() -> SchemaRef {
 // and a full reindex — fine for a dev rebuilding from source every time, not
 // something a real installed user updating across a release should have to
 // discover from a `missing name column` error.
-const MIGRATABLE_COLUMNS: &[(&str, &str)] = &[("name", "''"), ("truncated", "false")];
+const MIGRATABLE_COLUMNS: &[(&str, &str)] = &[("name", "''"), ("truncated", "false"), ("mtime", "0")];
 
 async fn migrate_schema(table: &Table) -> Result<()> {
     let current = table.schema().await?;
@@ -196,6 +204,7 @@ impl Store {
         let mut contents = Vec::with_capacity(n);
         let mut names = Vec::with_capacity(n);
         let mut truncated = Vec::with_capacity(n);
+        let mut mtimes = Vec::with_capacity(n);
         let mut embeddings = Vec::with_capacity(n);
         for c in chunks {
             paths.push(path.to_string());
@@ -205,6 +214,7 @@ impl Store {
             contents.push(c.content);
             names.push(c.name);
             truncated.push(c.truncated);
+            mtimes.push(c.mtime);
             embeddings.push(Some(c.embedding.into_iter().map(Some).collect::<Vec<_>>()));
         }
 
@@ -218,6 +228,7 @@ impl Store {
                 Arc::new(StringArray::from(contents)),
                 Arc::new(StringArray::from(names)),
                 Arc::new(BooleanArray::from(truncated)),
+                Arc::new(Int64Array::from(mtimes)),
                 Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
                     embeddings,
                     EMBEDDING_DIM as i32,
@@ -283,6 +294,7 @@ impl Store {
             "content".to_string(),
             "name".to_string(),
             "truncated".to_string(),
+            "mtime".to_string(),
             "embedding".to_string(),
         ]));
         if let Some(folder) = folder {
@@ -344,6 +356,10 @@ impl Store {
                 .column_by_name("truncated")
                 .context("missing truncated column")?
                 .as_boolean();
+            let mtimes = batch
+                .column_by_name("mtime")
+                .context("missing mtime column")?
+                .as_primitive::<arrow_array::types::Int64Type>();
             let embeddings = batch
                 .column_by_name("embedding")
                 .context("missing embedding column")?
@@ -382,6 +398,7 @@ impl Store {
                     chunk_kind: chunk_kinds.value(i).to_string(),
                     name: names.value(i).to_string(),
                     truncated: truncated_flags.value(i),
+                    mtime: mtimes.value(i),
                 });
             }
         }
@@ -422,6 +439,7 @@ impl Store {
                 "content".to_string(),
                 "name".to_string(),
                 "truncated".to_string(),
+                "mtime".to_string(),
             ]))
             .only_if(predicate)
             .execute()
@@ -453,6 +471,10 @@ impl Store {
                 .column_by_name("truncated")
                 .context("missing truncated column")?
                 .as_boolean();
+            let mtimes = batch
+                .column_by_name("mtime")
+                .context("missing mtime column")?
+                .as_primitive::<arrow_array::types::Int64Type>();
 
             for i in 0..batch.num_rows() {
                 hits.push(HybridHit {
@@ -464,6 +486,7 @@ impl Store {
                     chunk_kind: chunk_kinds.value(i).to_string(),
                     name: names.value(i).to_string(),
                     truncated: truncated_flags.value(i),
+                    mtime: mtimes.value(i),
                 });
             }
         }
@@ -578,6 +601,7 @@ impl Store {
             "content".to_string(),
             "name".to_string(),
             "truncated".to_string(),
+            "mtime".to_string(),
             "embedding".to_string(),
         ]));
         if let Some(folder) = folder {
@@ -610,6 +634,10 @@ impl Store {
                 .column_by_name("truncated")
                 .context("missing truncated column")?
                 .as_boolean();
+            let mtimes = batch
+                .column_by_name("mtime")
+                .context("missing mtime column")?
+                .as_primitive::<arrow_array::types::Int64Type>();
             let embeddings = batch
                 .column_by_name("embedding")
                 .context("missing embedding column")?
@@ -635,6 +663,7 @@ impl Store {
                     chunk_kind: chunk_kinds.value(i).to_string(),
                     name: names.value(i).to_string(),
                     truncated: truncated_flags.value(i),
+                    mtime: mtimes.value(i),
                 });
             }
         }
@@ -715,6 +744,7 @@ mod tests {
                 embedding,
                 name: c.name.unwrap_or_default(),
                 truncated,
+                mtime: 0,
             })
             .collect()
     }
@@ -757,7 +787,8 @@ mod tests {
             ],
         )
         .unwrap();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], old_schema);
+        let reader: Box<dyn arrow_array::RecordBatchReader + Send> =
+            Box::new(RecordBatchIterator::new(vec![Ok(batch)], old_schema));
 
         let db = connect(db_uri).execute().await.unwrap();
         db.create_table(TABLE_NAME, reader).execute().await.unwrap();
@@ -1025,6 +1056,7 @@ fn parse_config(path: &str) -> bool {
                 embedding,
                 name: String::new(),
                 truncated: false,
+                mtime: 0,
             })
             .collect();
         store.replace_chunks("/filler/doc.txt", filler_records).await.unwrap();
@@ -1069,6 +1101,45 @@ fn keep_me() -> i32 { 1 }
         assert!(
             hits.iter().any(|h| h.name == "keep_me"),
             "post-index upsert must remain searchable"
+        );
+    }
+
+    /// Two independent `Store::open` handles on the same on-disk table,
+    /// mirroring the app process (writer) and a long-lived `reference-mcp`
+    /// process (reader) opened once and kept alive for a whole session.
+    /// `hybrid_search`'s `checkout_latest()` call (added in `85bfa45` to fix
+    /// exactly this) is supposed to make a write from one handle visible to
+    /// the other on the very next read — this pins down whether that's
+    /// actually true, rather than assuming it from reading the call site.
+    #[tokio::test]
+    async fn a_second_open_handle_sees_writes_committed_by_the_first() {
+        let embedder = embedder().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_uri = dir.path().to_str().unwrap();
+
+        let writer = Store::open(db_uri).await.expect("open writer store");
+        let reader = Store::open(db_uri).await.expect("open reader store");
+
+        let query_embedding = embedder.embed("widgets").unwrap();
+        let hits_before = reader
+            .hybrid_search("widgets", &query_embedding, 5, None, None, &RankingWeights::default())
+            .await
+            .unwrap();
+        assert!(hits_before.is_empty(), "reader must start with nothing indexed");
+
+        writer
+            .replace_chunks("/proj/widgets.txt", records_for(embedder, "txt", "content about widgets").await)
+            .await
+            .unwrap();
+
+        let hits_after = reader
+            .hybrid_search("widgets", &query_embedding, 5, None, None, &RankingWeights::default())
+            .await
+            .unwrap();
+        assert!(
+            !hits_after.is_empty(),
+            "a second long-lived handle opened before the write must see it on the next \
+             hybrid_search call via checkout_latest, without reopening the table"
         );
     }
 }

@@ -99,6 +99,29 @@ struct JsonHit {
     // it, unlike the app's UI where a human just clicks through. Returning
     // it here saves a follow-up Read call on every single search.
     content: String,
+    // Live reindexing is best-effort, not instant (see
+    // docs/mcp-agent-usage.md's caveats) — FSEvents delivery on macOS has
+    // been observed to be non-deterministic under system load, and even
+    // the periodic re-scan fallback only catches up every few minutes. This
+    // compares the row's stored `mtime` against the file's actual on-disk
+    // mtime *at query time* so a caller can tell "this content may not
+    // reflect the file's current state" instead of silently trusting a
+    // result that's mid-reindex or was never caught by a missed event.
+    possibly_stale: bool,
+}
+
+/// True when `path`'s current on-disk mtime is newer than `indexed_mtime` —
+/// the row this hit came from was embedded from older content than what's
+/// on disk right now. `false` (not stale) if the file can't be stat'd at
+/// all (deleted since indexing, permissions): no signal either way, and
+/// treating "can't tell" as "stale" would just be noise on every result
+/// whenever a path is momentarily unreadable.
+fn is_possibly_stale(path: &str, indexed_mtime: i64) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|d| d.as_secs() as i64 > indexed_mtime)
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -264,6 +287,7 @@ impl ReferenceServer {
                 chunk_kind: h.chunk_kind.clone(),
                 score: h.score,
                 content: truncate_content(&h.content, max_chars),
+                possibly_stale: is_possibly_stale(&h.path, h.mtime),
             })
             .collect();
         let citations: Vec<JsonCitation> = citations
@@ -368,6 +392,7 @@ impl ReferenceServer {
                 chunk_kind: h.chunk_kind.clone(),
                 score: h.score,
                 content: truncate_content(&h.content, max_chars),
+                possibly_stale: is_possibly_stale(&h.path, h.mtime),
             })
             .collect();
 
@@ -410,6 +435,7 @@ impl ReferenceServer {
                 chunk_kind: h.chunk_kind.clone(),
                 score: h.score,
                 content: truncate_content(&h.content, max_chars),
+                possibly_stale: is_possibly_stale(&h.path, h.mtime),
             })
             .collect();
 
@@ -474,6 +500,7 @@ mod tests {
                 embedding,
                 name: c.name.unwrap_or_default(),
                 truncated,
+                mtime: 0,
             })
             .collect()
     }

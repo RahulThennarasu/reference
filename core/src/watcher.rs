@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::Result;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -72,6 +73,25 @@ fn is_skipped_file(path: &Path) -> bool {
     path.file_name().and_then(|n| n.to_str()).is_some_and(|n| SKIPPED_FILENAMES.contains(&n))
 }
 
+/// How often the periodic full re-scan re-walks a watched folder as a
+/// self-healing fallback for the live `notify` watch — FSEvents delivery on
+/// macOS has been observed to be non-deterministic under system load
+/// (sometimes instant, sometimes delayed well past what a live watch alone
+/// should need), so this exists purely to catch whatever a missed/delayed
+/// live event didn't. Cheap by construction: `last_mtime` means every file
+/// whose on-disk mtime hasn't changed since it was last embedded costs one
+/// `fs::metadata` stat, not a re-embed.
+const PERIODIC_RESCAN_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Unix epoch seconds for `path`'s on-disk mtime, or `None` if it can't be
+/// read (deleted mid-scan, permissions, etc.) — callers treat that the same
+/// as "unknown," i.e. always worth (re-)indexing rather than erroring out.
+fn file_mtime(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let secs = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(secs as i64)
+}
+
 /// Compiles every `.gitignore` found under `root` into a single matcher, so
 /// live file events under `target/`, `node_modules/`, etc. can be skipped
 /// the same way the initial scan skips them. Built once per `watch()` call;
@@ -88,7 +108,12 @@ fn build_gitignore(root: &Path) -> Gitignore {
     builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
-async fn index_file(embedder: &Embedder, store: &Store, path: &Path) -> Result<()> {
+/// Indexes `path`, embedding and writing chunks via `store.replace_chunks`.
+/// `mtime` is the on-disk mtime the caller already read (Unix epoch
+/// seconds) — passed in rather than re-read here so a caller like the
+/// periodic re-scan can decide *not* to call this at all when the mtime
+/// it already has matches what's cached, without a redundant stat inside.
+async fn index_file(embedder: &Embedder, store: &Store, path: &Path, mtime: i64) -> Result<()> {
     if is_skipped_file(path) {
         return Ok(());
     }
@@ -133,6 +158,7 @@ async fn index_file(embedder: &Embedder, store: &Store, path: &Path) -> Result<(
             embedding,
             name: c.name.unwrap_or_default(),
             truncated,
+            mtime,
         })
         .collect();
 
@@ -187,6 +213,22 @@ pub async fn watch(
     total_files: usize,
     on_progress: impl Fn(IndexProgress) + Send + Sync + 'static,
 ) -> Result<()> {
+    // Registered before the initial scan (not after) so an edit made *during*
+    // a long initial scan of a large folder isn't lost forever — notify only
+    // delivers events from the moment `.watch()` is called, and a big real
+    // project's initial scan can take long enough for that window to matter.
+    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = notify::recommended_watcher(tx)?;
+    watcher.watch(folder, RecursiveMode::Recursive)?;
+
+    // Tracks the on-disk mtime last successfully embedded for each path —
+    // updated by the initial scan, live events, and the periodic re-scan
+    // alike. The periodic re-scan (below) consults this to skip a file
+    // whose mtime hasn't moved since it was last indexed, so self-healing
+    // against a missed/delayed live event costs a stat per file, not a
+    // re-embed of the whole folder every interval.
+    let mut last_mtime: HashMap<String, i64> = HashMap::new();
+
     println!("indexing existing files under {}", folder.display());
     on_progress(IndexProgress { indexed: 0, total: total_files, done: false, failed_count: 0, failed: Vec::new() });
     let mut indexed = 0usize;
@@ -204,12 +246,15 @@ pub async fn watch(
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        if let Err(e) = index_file(embedder, store, entry.path()).await {
+        let mtime = file_mtime(entry.path()).unwrap_or(0);
+        if let Err(e) = index_file(embedder, store, entry.path(), mtime).await {
             eprintln!("failed to index {}: {e}", entry.path().display());
             failed_count += 1;
             if failed.len() < MAX_TRACKED_FAILURES {
                 failed.push(entry.path().display().to_string());
             }
+        } else {
+            last_mtime.insert(entry.path().to_string_lossy().to_string(), mtime);
         }
         indexed += 1;
         // Clamped: `total_files` is counted before the walk starts, so a
@@ -230,10 +275,7 @@ pub async fn watch(
     on_progress(IndexProgress { indexed: total_files, total: total_files, done: true, failed_count, failed });
 
     let gitignore = build_gitignore(folder);
-
-    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
-    let mut watcher = notify::recommended_watcher(tx)?;
-    watcher.watch(folder, RecursiveMode::Recursive)?;
+    let mut last_full_rescan = Instant::now();
 
     println!("watching {} for changes...", folder.display());
     loop {
@@ -244,7 +286,42 @@ pub async fn watch(
 
         let res = match rx.recv_timeout(Duration::from_millis(300)) {
             Ok(res) => res,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Self-healing fallback for `notify` delivery that's missed
+                // or arrived much later than expected (observed in practice
+                // to be non-deterministic under system load on macOS) — see
+                // `PERIODIC_RESCAN_INTERVAL`'s doc comment. Only reachable on
+                // an idle tick (no pending fs event), so it never competes
+                // with actually-arriving live events for this thread's time.
+                if last_full_rescan.elapsed() >= PERIODIC_RESCAN_INTERVAL {
+                    last_full_rescan = Instant::now();
+                    for entry in WalkBuilder::new(folder)
+                        .require_git(false)
+                        .build()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+                    {
+                        if stop.load(Ordering::Relaxed) {
+                            return Ok(());
+                        }
+                        let path = entry.path();
+                        if gitignore.matched_path_or_any_parents(path, false).is_ignore() {
+                            continue;
+                        }
+                        let Some(mtime) = file_mtime(path) else { continue };
+                        let path_key = path.to_string_lossy().to_string();
+                        if last_mtime.get(&path_key) == Some(&mtime) {
+                            continue;
+                        }
+                        if let Err(e) = index_file(embedder, store, path, mtime).await {
+                            eprintln!("periodic re-scan failed to index {}: {e}", path.display());
+                        } else {
+                            last_mtime.insert(path_key, mtime);
+                        }
+                    }
+                }
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
         };
 
@@ -268,8 +345,11 @@ pub async fn watch(
             if gitignore.matched_path_or_any_parents(path, false).is_ignore() {
                 continue;
             }
-            if let Err(e) = index_file(embedder, store, path).await {
+            let mtime = file_mtime(path).unwrap_or(0);
+            if let Err(e) = index_file(embedder, store, path, mtime).await {
                 eprintln!("failed to index {}: {e}", path.display());
+            } else {
+                last_mtime.insert(path.to_string_lossy().to_string(), mtime);
             }
         }
     }
