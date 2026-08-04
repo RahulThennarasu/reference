@@ -22,14 +22,14 @@ this app is the real version: an actual local index of your files, kept current 
 
 - raycast is mac only and its "ai" features are thin wrappers around cloud apis, not a real local index
 - cloud rag tools require your files to leave the machine, a non starter for code and private notes
-- this app is cross-platform first, genuinely good on windows/nvidia hardware, not a mac-only tool with windows as an afterthought
+- this app is working to be cross-platform, not a mac-only tool
 
 ## tech stack
 
 | piece           | choice                    | why                                                                                                                                                   |
 | --------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| app shell       | tauri (rust)              | lightweight cross-platform desktop shell, avoids bundling a python runtime                                                                            |
-| file watching   | `notify` crate            | cross-platform filesystem event watching                                                                                                              |
+| app shell       | tauri (rust)              | lightweight desktop shell, avoids bundling a python runtime                                                                            |
+| file watching   | `notify` crate            | filesystem event watching                                                                                                              |
 | embeddings      | `candle` (rust-native ml) | cuda support on pc, metal support on mac, no python dependency                                                                                        |
 | embedding model | all-minilm-l6-v2          | smallest, fastest, most battle-tested with candle, safest starting point                                                                              |
 | vector storage  | lancedb (rust crate)      | embedded (in process, no server), native rust bindings, hybrid vector + metadata filtering, versioned storage                                         |
