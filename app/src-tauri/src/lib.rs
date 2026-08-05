@@ -1,3 +1,5 @@
+mod scaffold;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -745,6 +747,25 @@ fn start_watch(state: State<'_, AppState>, folder: String) -> Result<(), String>
     start_watching_folder(&state, folder)
 }
 
+/// Called separately from `start_watch`, only after the user opts in via
+/// the one-time "set up Claude Code integration?" confirmation in the
+/// folder-picker flow — scaffolding is offered, never automatic, matching
+/// this project's "opt-in, never automatic" principle for indexing itself.
+/// Safe to call again for an already-scaffolded folder (e.g. unwatch then
+/// re-watch): every write `scaffold::scaffold_folder` does is idempotent.
+#[tauri::command]
+fn scaffold_agent_integration(folder: String) -> Result<(), String> {
+    scaffold::scaffold_folder(&PathBuf::from(folder)).map_err(|e| e.to_string())
+}
+
+/// Checked before offering the opt-in scaffold prompt, so a folder that's
+/// already scaffolded (from a prior watch, even if since unwatched) isn't
+/// asked about again. See `scaffold::is_scaffolded`.
+#[tauri::command]
+fn is_folder_scaffolded(folder: String) -> bool {
+    scaffold::is_scaffolded(&PathBuf::from(folder))
+}
+
 /// Stops watching `folder`: signals its background thread to exit, waits
 /// for it to actually confirm that (up to ~300ms, see `watcher::watch`'s
 /// loop), drops it from the persisted folder list, and only then purges
@@ -992,6 +1013,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_process::init())
@@ -1064,6 +1086,8 @@ pub fn run() {
             find_line,
             read_chunk_preview,
             start_watch,
+            scaffold_agent_integration,
+            is_folder_scaffolded,
             stop_watch,
             list_watched,
             get_indexing_progress,

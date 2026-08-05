@@ -11,6 +11,7 @@ import {
 import { parseInline } from "marked";
 import DOMPurify from "dompurify";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import hljs from "highlight.js/lib/core";
 import rust from "highlight.js/lib/languages/rust";
 import python from "highlight.js/lib/languages/python";
@@ -1399,6 +1400,28 @@ async function commitFolder() {
   if (searchInputEl) searchInputEl.placeholder = `indexing ${folderName}...`;
   try {
     await invoke("start_watch", { folder });
+    // Only offer scaffolding for a folder that isn't already scaffolded on
+    // disk — checked against the filesystem, not the watched-folders list,
+    // so unwatch-then-rewatch doesn't re-prompt (the scaffold files outlive
+    // the watch). `scaffold_agent_integration` is opt-in (never automatic),
+    // matching this project's indexing-itself principle. See
+    // docs/agent-integration-scaffolding-plan.md.
+    const alreadyScaffolded = await invoke<boolean>("is_folder_scaffolded", {
+      folder,
+    });
+    const shouldScaffold =
+      !alreadyScaffolded &&
+      (await confirm(
+        `This adds slash commands, tool-choice hooks, and a CLAUDE.md section to this folder so Claude Code prefers semantic search over grep here.`,
+        { title: `Set up Claude Code integration for "${folderName}"?` },
+      ));
+    if (shouldScaffold) {
+      try {
+        await invoke("scaffold_agent_integration", { folder });
+      } catch (err) {
+        console.error("scaffold_agent_integration failed", err);
+      }
+    }
   } catch (err) {
     console.error("start_watch failed", err);
     renderError(`failed to watch ${folder}: ${err}`);
