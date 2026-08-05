@@ -57,3 +57,17 @@ since prose here can't force tool choice, `.claude/settings.json` also wires up 
 - no general chatbot mode
 - no auto-indexing by default
 - no persistent "network activity: none" indicator in the main search ui, this was deliberately cut as unnecessary clutter, it can live in settings if surfaced at all
+
+## semantic code search
+<!-- reference-mcp-scaffold -->
+
+this folder is indexed by [reference](https://github.com) (symbol: &), a local semantic code search tool. an MCP server exposes four read-only tools over that index: `search`, `explain`, `find_similar`, and `check_doc_drift`.
+
+use `search` (or `explain`, which behaves the same but always synthesizes citations) first, before grep, whenever a question names no literal string/identifier to search for and instead describes *behavior* or *intent* — grep is still the right tool once you already know the identifier/string you're looking for.
+
+- `mcp__reference-mcp__search` — natural-language query, returns matching chunks with citations.
+- `mcp__reference-mcp__explain` — same as `search` but always synthesizes citations, useful for a bare identifier or short phrase.
+- `mcp__reference-mcp__find_similar` — takes a chunk (path + start_line) and finds other chunks with the closest embedding, useful for catching duplicated logic before writing new code.
+- `mcp__reference-mcp__check_doc_drift` — takes a doc chunk and checks whether it still matches actual code in the index, flagging `likely_stale` if not.
+
+`/refsearch <query>`, `/explain <query>`, `/findsimilar <path> <start_line>`, `/checkdocdrift <path> <start_line>`, and `/recall <query>` are slash commands that call these tools directly, scoped to this folder via `${CLAUDE_PROJECT_DIR}`.
